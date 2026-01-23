@@ -1,0 +1,79 @@
+/**:
+    ros__parameters:
+        feature_extract_enable: false # true = edge/plane extraction (selective, slower); false = raw points (denser, faster)
+        point_filter_num: 3           # higher keeps fewer points (faster, coarser); lower keeps more (slower, denser)
+        max_iteration: 3              # higher = more ICP/EKF iters (better convergence, more CPU); lower = faster, less robust
+        filter_size_surf: 0.5         # higher = stronger scan downsample (faster, less detail); lower = denser scan (slower)
+        filter_size_map: 0.5          # higher = coarser map voxels (lighter, less detail); lower = denser map (heavier)
+        cube_side_length: 50.0        # higher keeps larger local map (more memory/CPU, more context); lower trims map (lighter)
+        runtime_pos_log_enable: false # true writes pose log to disk; false disables logging
+        # map_file_path: "/home/attia/bags/dvl/rosbag2_2025_12_18-16_05_57/map.pcd"    # map save/load path; change to redirect outputs
+
+        common:
+            lid_topic:  "/IsaacSim/ThreeDSonar_LowFrequency"
+            imu_topic:  "/auv/imu"
+            time_sync_en: false         # ONLY turn on when external time synchronization is really not possible
+            time_offset_lidar_to_imu: 0.0 # Time offset between lidar and IMU calibrated by other algorithms, e.g. LI-Init (can be found in README).
+                                        # This param will take effect no matter what time_sync_en is. So if the time offset is not known exactly, please set as 0.0
+
+        preprocess:
+            lidar_type: 5                # 1: Livox, 2: Velodyne, 3: Ouster, 4: Mid360, 5: WaterLinked solid-state
+            scan_line: 32                # number of scan lines of the LiDAR 
+            blind: 0.2
+            scan_rate: 5                
+
+
+        mapping:
+            acc_cov: 0.075 
+                # Accelerometer measurement noise covariance.
+                # Controls how strongly linear acceleration is trusted in state propagation.
+                # Higher  -> trust accel less: smoother velocity/position, but increased translational lag.
+                # Lower   -> trust accel more: faster response to motion, but more noise and vibration in translation.
+
+            gyr_cov: 0.01
+                # Gyroscope measurement noise covariance.
+                # Controls how strongly angular rate measurements are trusted.
+                # Higher  -> trust gyro less: smoother attitude, but attitude (and thus translation) may lag.
+                # Lower   -> trust gyro more: faster attitude response, but increased orientation jitter.
+
+            b_acc_cov: 0.0001
+                # Accelerometer bias process noise (bias random-walk).
+                # Controls how quickly accelerometer bias is allowed to change over time.
+                # Higher  -> bias adapts faster: reduces long-term translation drift,
+                #            but can introduce low-frequency position noise.
+                # Lower   -> bias adapts slowly: smoother estimates, but risk of steady-state
+                #            translational error accumulating between corrections.
+
+            b_gyr_cov: 0.001
+                # Gyroscope bias process noise (bias random-walk).
+                # Controls how quickly gyro bias is allowed to change.
+                # Higher  -> bias adapts faster: reduces attitude/yaw drift,
+                #            but may destabilize orientation if too large.
+                # Lower   -> bias adapts slowly: stable attitude, but increased long-term drift.
+
+            fov_degree: 90.0    # lidar horizontal FOV used for map segmentation
+            det_range: 15.0     # max range of lidar points considered; raise to keep farther points, lower to ignore distant returns
+            extrinsic_est_en:  true          
+
+            # IMU to LIDAR transform (if extrinsic_est_en is false, use these values; if true, use as initial guess)
+            extrinsic_T: [ 0.0, 0.0, 0.0 ]
+            extrinsic_R: [ 1., 0., 0.,
+                        0., 1., 0.,
+                        0., 0., 1.]
+
+        frames:
+            map_frame: "World"
+            odom_frame: "camera_init"
+            body_frame: "body"
+
+        publish:
+            path_en:  true
+            scan_publish_en:  true       # false: close all the point cloud output
+            dense_publish_en: true       # false: low down the points number in a global-frame point clouds scan.
+            scan_bodyframe_pub_en: true  # true: output the point cloud scans in IMU-body-frame
+            map_en: true                 # enable map accumulation so /map_save writes a populated PCD
+
+        map_file_path: "/home/attia/bags/no dvl/rosbag2_2025_12_18-16_37_38$"
+        pcd_save:
+            pcd_save_en: true
+            interval: -1   # one file; use N to split every N scans

@@ -94,7 +94,7 @@ condition_variable sig_buffer;
 
 string root_dir = ROOT_DIR;
 string map_file_path, lid_topic, imu_topic;
-string map_frame_id = "map";
+string map_frame_id;
 string odom_frame_id = "camera_init";
 string body_frame_id = "body";
 

@@ -480,7 +480,16 @@ void Preprocess::velodyne_handler(const sensor_msgs::msg::PointCloud2::UniquePtr
       added_pt.x = pl_orig.points[i].x;
       added_pt.y = pl_orig.points[i].y;
       added_pt.z = pl_orig.points[i].z;
-      added_pt.intensity = pl_orig.points[i].intensity;
+      static bool warned_no_intensity = false;
+      if (pl_orig.points[i].intensity == 0) {
+        if (!warned_no_intensity) {
+          RCLCPP_WARN(rclcpp::get_logger("fast_lio.preprocess"), "No intensity detected in Velodyne point cloud, defaulting to 255.");
+          warned_no_intensity = true;
+        }
+        added_pt.intensity = 255;
+      } else {
+        added_pt.intensity = pl_orig.points[i].intensity;
+      }
       added_pt.curvature = pl_orig.points[i].time * time_unit_scale;  // units: ms
 
       if (!given_offset_time)
@@ -687,6 +696,44 @@ void Preprocess::default_handler(const sensor_msgs::msg::PointCloud2::UniquePtr 
   pl_surf.clear();
   pl_corn.clear();
   pl_full.clear();
+
+  static bool warned_missing_intensity = false;
+  const bool has_intensity = has_field(*msg, "intensity");
+  if (!has_intensity)
+  {
+    if (!warned_missing_intensity)
+    {
+      RCLCPP_WARN(kPreLogger, "PointCloud2 is missing 'intensity' field; using default intensity 255.");
+      warned_missing_intensity = true;
+    }
+
+    const auto plsize = static_cast<int>(msg->width * msg->height);
+    if (plsize == 0)
+      return;
+    pl_surf.reserve(plsize);
+
+    sensor_msgs::PointCloud2ConstIterator<float> iter_x(*msg, "x");
+    sensor_msgs::PointCloud2ConstIterator<float> iter_y(*msg, "y");
+    sensor_msgs::PointCloud2ConstIterator<float> iter_z(*msg, "z");
+    for (; iter_x != iter_x.end(); ++iter_x, ++iter_y, ++iter_z)
+    {
+      PointType added_pt;
+      added_pt.normal_x = 0;
+      added_pt.normal_y = 0;
+      added_pt.normal_z = 0;
+      added_pt.x = *iter_x;
+      added_pt.y = *iter_y;
+      added_pt.z = *iter_z;
+      added_pt.intensity = 255.0f;
+      added_pt.curvature = 0.;
+
+      if (added_pt.x * added_pt.x + added_pt.y * added_pt.y + added_pt.z * added_pt.z > (blind * blind))
+      {
+        pl_surf.push_back(std::move(added_pt));
+      }
+    }
+    return;
+  }
 
   pcl::PointCloud<pcl::PointXYZI> pl_orig;
   pcl::fromROSMsg(*msg, pl_orig);
