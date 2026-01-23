@@ -19,18 +19,17 @@
         preprocess:
             lidar_type: 5                # 1: Livox, 2: Velodyne, 3: Ouster, 4: Mid360, 5: WaterLinked solid-state
             scan_line: 32                # number of scan lines of the LiDAR 
-            blind: 0.2
-            scan_rate: 5                
+            blind: 0.2             
 
 
         mapping:
-            acc_cov: 0.075 
+            acc_cov: 0.0001
                 # Accelerometer measurement noise covariance.
                 # Controls how strongly linear acceleration is trusted in state propagation.
                 # Higher  -> trust accel less: smoother velocity/position, but increased translational lag.
                 # Lower   -> trust accel more: faster response to motion, but more noise and vibration in translation.
 
-            gyr_cov: 0.01
+            gyr_cov: 0.0001
                 # Gyroscope measurement noise covariance.
                 # Controls how strongly angular rate measurements are trusted.
                 # Higher  -> trust gyro less: smoother attitude, but attitude (and thus translation) may lag.
@@ -44,7 +43,7 @@
                 # Lower   -> bias adapts slowly: smoother estimates, but risk of steady-state
                 #            translational error accumulating between corrections.
 
-            b_gyr_cov: 0.001
+            b_gyr_cov: 0.0001
                 # Gyroscope bias process noise (bias random-walk).
                 # Controls how quickly gyro bias is allowed to change.
                 # Higher  -> bias adapts faster: reduces attitude/yaw drift,
@@ -55,11 +54,16 @@
             det_range: 15.0     # max range of lidar points considered; raise to keep farther points, lower to ignore distant returns
             extrinsic_est_en:  true          
 
-            # IMU to LIDAR transform (if extrinsic_est_en is false, use these values; if true, use as initial guess)
             extrinsic_T: [ 0.0, 0.0, 0.0 ]
             extrinsic_R: [ 1., 0., 0.,
                         0., 1., 0.,
                         0., 0., 1.]
+
+        dynamics:
+            enable: true
+            config_name: "BlueROV"  # maps to auv_core_helper/param/dynamic_model/<config_name>.conf
+            forces_topic: "/auv/forces_desired_stamped"
+            model_trust: 1.0  # 1.0 = fully trust dynamics, 0.0 = ignore dynamics
 
         frames:
             map_frame: "World"

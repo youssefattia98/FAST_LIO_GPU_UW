@@ -1644,7 +1644,7 @@ public:
 			#ifdef USE_sparse
 				spMt h_x_ = dyn_share.h_x.sparseView();
 			#else
-				Eigen::Matrix<scalar_type, Eigen::Dynamic, 12> h_x_ = dyn_share.h_x;
+				Eigen::Matrix<scalar_type, Eigen::Dynamic, n> h_x_ = dyn_share.h_x;
 			#endif
 			double solve_start = omp_get_wtime();
 			dof_Measurement = h_x_.rows();
@@ -1719,7 +1719,7 @@ public:
 				//spMt R_temp = h_v * R_ * h_v.transpose();
 				//K_temp += R_temp;
 				Eigen::Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> h_x_cur = Eigen::Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic>::Zero(dof_Measurement, n);
-				h_x_cur.topLeftCorner(dof_Measurement, 12) = h_x_;
+				h_x_cur.topLeftCorner(dof_Measurement, n) = h_x_;
 				/*
 				h_x_cur.col(0) = h_x_.col(0);
 				h_x_cur.col(1) = h_x_.col(1);
@@ -1749,7 +1749,7 @@ public:
 				//Eigen::SparseQR<Eigen::SparseMatrix<scalar_type>, Eigen::COLAMDOrdering<int>> solver; 
 				spMt A = h_x_.transpose() * h_x_;
 				cov P_temp = (P_/R).inverse();
-				P_temp. template block<12, 12>(0, 0) += A;
+				P_temp. template block<n, n>(0, 0) += A;
 				P_temp = P_temp.inverse();
 				/*
 				Eigen::Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> h_x_cur = Eigen::Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic>::Zero(dof_Measurement, n);
@@ -1766,9 +1766,9 @@ public:
 				h_x_cur.col(10) = h_x_.col(10);
 				h_x_cur.col(11) = h_x_.col(11);
 				*/
-				K_ = P_temp. template block<n, 12>(0, 0) * h_x_.transpose();
+				K_ = P_temp. template block<n, n>(0, 0) * h_x_.transpose();
 				K_x = cov::Zero();
-				K_x. template block<n, 12>(0, 0) = P_inv. template block<n, 12>(0, 0) * HTH;
+				K_x. template block<n, n>(0, 0) = P_inv. template block<n, n>(0, 0) * HTH;
 				/*
 				solver.compute(R_);
 				Eigen::Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> R_in_temp = solver.solve(b);
@@ -1781,8 +1781,8 @@ public:
 			#else
 				cov P_temp = (P_/R).inverse();
 				//Eigen::Matrix<scalar_type, 12, Eigen::Dynamic> h_T = h_x_.transpose();
-				Eigen::Matrix<scalar_type, 12, 12> HTH = h_x_.transpose() * h_x_; 
-				P_temp. template block<12, 12>(0, 0) += HTH;
+				Eigen::Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> HTH = h_x_.transpose() * h_x_; 
+				P_temp. template block<n, n>(0, 0) += HTH;
 				/*
 				Eigen::Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> h_x_cur = Eigen::Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic>::Zero(dof_Measurement, n);
 				//std::cout << "line 1767" << std::endl;
@@ -1801,12 +1801,12 @@ public:
 				*/
 				cov P_inv = P_temp.inverse();
 				//std::cout << "line 1781" << std::endl;
-				K_h = P_inv. template block<n, 12>(0, 0) * h_x_.transpose() * dyn_share.h;
+				K_h = P_inv. template block<n, n>(0, 0) * h_x_.transpose() * dyn_share.h;
 				//std::cout << "line 1780" << std::endl;
 				//cov HTH_cur = cov::Zero();
 				//HTH_cur. template block<12, 12>(0, 0) = HTH;
 				K_x.setZero(); // = cov::Zero();
-				K_x. template block<n, 12>(0, 0) = P_inv. template block<n, 12>(0, 0) * HTH;
+				K_x. template block<n, n>(0, 0) = P_inv. template block<n, n>(0, 0) * HTH;
 				//K_= (h_x_.transpose() * h_x_ + (P_/R).inverse()).inverse()*h_x_.transpose();
 			#endif 
 			}

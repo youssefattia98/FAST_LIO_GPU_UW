@@ -45,8 +45,12 @@
 #include <so3_math.h>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp/executors/multi_threaded_executor.hpp>
+#include <ament_index_cpp/get_package_share_directory.hpp>
+#include <libconfig.h++>
 #include <Eigen/Core>
 #include "IMU_Processing.hpp"
+#include "dynamics_bridge.hpp"
+#include "underwater_vehicle_model.hpp"
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <visualization_msgs/msg/marker.hpp>
@@ -62,6 +66,7 @@
 #include <tf2_ros/static_transform_broadcaster.h>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <geometry_msgs/msg/vector3.hpp>
+#include <auv_core_helper/msg/thruster_forces.hpp>
 #ifdef FASTLIO_HAS_LIVOX
 #include <livox_ros_driver2/msg/custom_msg.hpp>
 #endif
@@ -100,6 +105,7 @@ string body_frame_id = "body";
 
 double res_mean_last = 0.05, total_residual = 0.0;
 double last_timestamp_lidar = 0, last_timestamp_imu = -1.0;
+double last_timestamp_thruster = -1.0;
 double gyr_cov = 0.1, acc_cov = 0.1, b_gyr_cov = 0.0001, b_acc_cov = 0.0001;
 double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min = 0, fov_deg = 0;
 double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
@@ -118,6 +124,7 @@ vector<double>       extrinR(9, 0.0);
 deque<double>                     time_buffer;
 deque<PointCloudXYZI::Ptr>        lidar_buffer;
 deque<sensor_msgs::msg::Imu::ConstSharedPtr> imu_buffer;
+deque<auv_core_helper::msg::ThrusterForces::ConstSharedPtr> thruster_buffer;
 
 PointCloudXYZI::Ptr featsFromMap(new PointCloudXYZI());
 PointCloudXYZI::Ptr feats_undistort(new PointCloudXYZI());
@@ -394,6 +401,26 @@ void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in)
     sig_buffer.notify_all();
 }
 
+void thruster_cbk(const auv_core_helper::msg::ThrusterForces::UniquePtr msg_in)
+{
+    auto msg = auv_core_helper::msg::ThrusterForces::SharedPtr(new auv_core_helper::msg::ThrusterForces(*msg_in));
+    double timestamp = get_time_sec(msg->header.stamp);
+
+    mtx_buffer.lock();
+
+    if (timestamp < last_timestamp_thruster)
+    {
+        std::cerr << "Thruster forces loop back, clear buffer" << std::endl;
+        thruster_buffer.clear();
+    }
+
+    last_timestamp_thruster = timestamp;
+    thruster_buffer.push_back(msg);
+
+    mtx_buffer.unlock();
+    sig_buffer.notify_all();
+}
+
 double lidar_mean_scantime = 0.0;
 int    scan_num = 0;
 bool sync_packages(MeasureGroup &meas)
@@ -442,6 +469,16 @@ bool sync_packages(MeasureGroup &meas)
         if(imu_time > lidar_end_time) break;
         meas.imu.push_back(imu_buffer.front());
         imu_buffer.pop_front();
+    }
+
+    /*** push thruster data, and pop from thruster buffer ***/
+    meas.thruster_forces.clear();
+    while (!thruster_buffer.empty())
+    {
+        double thruster_time = get_time_sec(thruster_buffer.front()->header.stamp);
+        if (thruster_time > lidar_end_time) break;
+        meas.thruster_forces.push_back(thruster_buffer.front());
+        thruster_buffer.pop_front();
     }
 
     lidar_buffer.pop_front();
@@ -773,7 +810,7 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     double solve_start_  = omp_get_wtime();
     
     /*** Computation of Measuremnt Jacobian matrix H and measurents vector ***/
-    ekfom_data.h_x = MatrixXd::Zero(effct_feat_num, 12); //23
+    ekfom_data.h_x = MatrixXd::Zero(effct_feat_num, 26);
     ekfom_data.h.resize(effct_feat_num);
 
     for (int i = 0; i < effct_feat_num; i++)
@@ -796,11 +833,13 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
         if (extrinsic_est_en)
         {
             V3D B(point_be_crossmat * s.offset_R_L_I.conjugate() * C); //s.rot.conjugate()*norm_vec);
-            ekfom_data.h_x.block<1, 12>(i,0) << norm_p.x, norm_p.y, norm_p.z, VEC_FROM_ARRAY(A), VEC_FROM_ARRAY(B), VEC_FROM_ARRAY(C);
+            ekfom_data.h_x.block<1, 26>(i,0) << norm_p.x, norm_p.y, norm_p.z, VEC_FROM_ARRAY(A), VEC_FROM_ARRAY(B), VEC_FROM_ARRAY(C),
+                                                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0;
         }
         else
         {
-            ekfom_data.h_x.block<1, 12>(i,0) << norm_p.x, norm_p.y, norm_p.z, VEC_FROM_ARRAY(A), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0;
+            ekfom_data.h_x.block<1, 26>(i,0) << norm_p.x, norm_p.y, norm_p.z, VEC_FROM_ARRAY(A), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                                                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0;
         }
 
         /*** Measuremnt: distance to the closest surface/corner ***/
@@ -849,6 +888,10 @@ public:
         this->declare_parameter<int>("pcd_save.interval", -1);
         this->declare_parameter<vector<double>>("mapping.extrinsic_T", vector<double>());
         this->declare_parameter<vector<double>>("mapping.extrinsic_R", vector<double>());
+        this->declare_parameter<bool>("dynamics.enable", true);
+        this->declare_parameter<string>("dynamics.config_name", "default_value");
+        this->declare_parameter<string>("dynamics.forces_topic", "/auv/forces_desired_stamped");
+        this->declare_parameter<double>("dynamics.model_trust", 1.0);
     this->declare_parameter<string>("frames.map_frame", map_frame_id);
     this->declare_parameter<string>("frames.odom_frame", odom_frame_id);
     this->declare_parameter<string>("frames.body_frame", body_frame_id);
@@ -888,6 +931,10 @@ public:
         this->get_parameter_or<int>("pcd_save.interval", pcd_save_interval, -1);
         this->get_parameter_or<vector<double>>("mapping.extrinsic_T", extrinT, vector<double>());
         this->get_parameter_or<vector<double>>("mapping.extrinsic_R", extrinR, vector<double>());
+        this->get_parameter_or<bool>("dynamics.enable", dynamics_enabled_, true);
+        this->get_parameter_or<string>("dynamics.config_name", dynamics_config_name_, "default_value");
+        this->get_parameter_or<string>("dynamics.forces_topic", dynamics_forces_topic_, "/auv/forces_desired_stamped");
+        this->get_parameter_or<double>("dynamics.model_trust", dynamics_model_trust_, 1.0);
         this->get_parameter_or<string>("frames.map_frame", map_frame_id, map_frame_id);
         this->get_parameter_or<string>("frames.odom_frame", odom_frame_id, odom_frame_id);
         this->get_parameter_or<string>("frames.body_frame", body_frame_id, body_frame_id);
@@ -933,8 +980,30 @@ public:
         p_imu->set_acc_cov(V3D(acc_cov, acc_cov, acc_cov));
         p_imu->set_gyr_bias_cov(V3D(b_gyr_cov, b_gyr_cov, b_gyr_cov));
         p_imu->set_acc_bias_cov(V3D(b_acc_cov, b_acc_cov, b_acc_cov));
+        p_imu->set_dynamics_trust(dynamics_model_trust_);
 
-        fill(epsi, epsi+23, 0.001);
+        if (dynamics_enabled_)
+        {
+            try
+            {
+                std::string package_path = ament_index_cpp::get_package_share_directory("auv_core_helper");
+                std::string config_path = package_path + "/param/dynamic_model/" + dynamics_config_name_ + ".conf";
+
+                libconfig::Config config;
+                config.readFile(config_path.c_str());
+
+                dynamics_model_ = std::make_shared<mvm::UnderwaterVehicleModel>(config, dynamics_config_name_);
+                fastlio::dynamics::set_model(dynamics_model_);
+                RCLCPP_INFO(this->get_logger(), "Dynamics model loaded: %s", config_path.c_str());
+            }
+            catch (const std::exception &ex)
+            {
+                dynamics_enabled_ = false;
+                RCLCPP_WARN(this->get_logger(), "Dynamics model disabled: %s", ex.what());
+            }
+        }
+
+        fill(epsi, epsi+26, 0.001);
         kf.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
 
         /*** debug record ***/
@@ -965,7 +1034,8 @@ public:
         {
             sub_pcl_pc_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(lid_topic, rclcpp::SensorDataQoS(), standard_pcl_cbk);
         }
-    sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(imu_topic, rclcpp::SensorDataQoS(), imu_cbk);
+        sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(imu_topic, rclcpp::SensorDataQoS(), imu_cbk);
+        sub_thrusters_ = this->create_subscription<auv_core_helper::msg::ThrusterForces>(dynamics_forces_topic_, 50, thruster_cbk);
         pubLaserCloudFull_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered", 20);
         pubLaserCloudFull_body_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered_body", 20);
         pubLaserCloudEffect_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_effected", 20);
@@ -1210,6 +1280,7 @@ private:
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu_;
+    rclcpp::Subscription<auv_core_helper::msg::ThrusterForces>::SharedPtr sub_thrusters_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_pcl_pc_;
 #ifdef FASTLIO_HAS_LIVOX
     rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr sub_pcl_livox_;
@@ -1221,11 +1292,17 @@ private:
     rclcpp::TimerBase::SharedPtr map_pub_timer_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr map_save_srv_;
 
+    bool dynamics_enabled_ = false;
+    std::string dynamics_config_name_;
+    std::string dynamics_forces_topic_;
+    double dynamics_model_trust_ = 1.0;
+    std::shared_ptr<mvm::UnderwaterVehicleModel> dynamics_model_;
+
     bool effect_pub_en = false, map_pub_en = false;
     int effect_feat_num = 0, frame_num = 0;
     double deltaT, deltaR, aver_time_consu = 0, aver_time_icp = 0, aver_time_match = 0, aver_time_incre = 0, aver_time_solve = 0, aver_time_const_H_time = 0;
     bool flg_EKF_converged, EKF_stop_flg = 0;
-    double epsi[23] = {0.001};
+    double epsi[26] = {0.001};
 
     FILE *fp;
     ofstream fout_pre, fout_out, fout_dbg;

@@ -368,4 +368,108 @@ the point-to-plane residual for point $j$ is
 \end{equation}
 which defines the LiDAR measurement model used in the EKF update step.
 
+\subsection{Underwater Dynamics Library, Simulation Code, and Thruster Inputs}
+
+The Fossen-type dynamics in \eqref{eq:fossen_dyn} are implemented in an existing
+C++ library, provided by the class \texttt{mvm::UnderwaterVehicleModel} defined in
+\texttt{underwater\_vehicle\_model.hpp}. This class encapsulates the 6-DOF
+underwater vehicle model by constructing the rigid-body and added-mass inertia
+matrix, Coriolis/centripetal matrix, hydrodynamic damping, and restoring forces
+from a configuration file, and by mapping individual thruster forces into the
+generalized force vector.
+
+Given body-frame velocity
+\[
+\boldsymbol{\nu}
+=
+\begin{bmatrix}
+\mathbf{v}^B \\[2pt]
+\boldsymbol{\omega}^B
+\end{bmatrix}
+=
+[u, v, w, p, q, r]^\top
+\]
+and pose
+\[
+\boldsymbol{\eta}
+=
+[x, y, z, \phi, \theta, \psi]^\top,
+\]
+the method
+\texttt{UnderwaterVehicleModel::UpdateModel(velocity, pose)} updates
+\(\mathbf{M}(\boldsymbol{\nu})\), \(\mathbf{C}(\boldsymbol{\nu})\),
+\(\mathbf{D}(\boldsymbol{\nu})\), and \(\mathbf{g}(\boldsymbol{\eta})\) internally.
+The generalized thruster forces \(\boldsymbol{\tau}\) are obtained from a vector
+of individual thruster inputs \(\boldsymbol{f}_{\text{thr}}\) via a precomputed
+thruster-wrench matrix:
+\begin{equation}
+  \boldsymbol{\tau}
+  =
+  \mathbf{T}_{\mathrm{thr}} \, \boldsymbol{f}_{\text{thr}},
+\end{equation}
+where \(\mathbf{T}_{\mathrm{thr}} \in \mathbb{R}^{6 \times n_{\mathrm{thr}}}\)
+is built from the thruster positions and orientations.
+
+The corresponding body-frame acceleration is computed by
+\texttt{UnderwaterVehicleModel::ComputeAcceleration(forces)}, which numerically
+implements
+\begin{equation}
+  \dot{\boldsymbol{\nu}}
+  =
+  \mathbf{M}^{-1}(\boldsymbol{\nu})
+  \big(
+    \boldsymbol{\tau}
+    -
+    \mathbf{C}(\boldsymbol{\nu})\boldsymbol{\nu}
+    -
+    \mathbf{D}(\boldsymbol{\nu})\boldsymbol{\nu}
+    -
+    \mathbf{g}(\boldsymbol{\eta})
+  \big),
+\end{equation}
+fully consistent with the Fossen dynamics in \eqref{eq:fossen_dyn}.
+
+This library is already used inside the ROS~2 simulation code located at
+\begin{center}
+  \texttt{/home/attia/ros2\_ws/src/auv\_core\_ros2/sim/src/sim/simulator.cpp},
+\end{center}
+in the \texttt{Simulator} node. In particular,
+\begin{itemize}
+  \item the constructor loads the dynamic model configuration from
+        \texttt{auv\_core\_helper/param/dynamic\_model/\textit{config\_name}.conf}
+        and instantiates
+        \texttt{dynamicsModel\_ = std::make\_unique<mvm::UnderwaterVehicleModel>(config, configNameParam);};
+  \item at each simulation step \texttt{Simulator::Simulate()}, the code
+        constructs the body-frame relative velocity \(\boldsymbol{\nu}\) and the
+        world-frame pose \(\boldsymbol{\eta}\), then calls
+        \begin{align}
+          &\texttt{dynamicsModel\_->UpdateModel(velocityActualRel\_, poseActual\_);}\\
+          &\texttt{accelerationActual\_ = dynamicsModel\_->ComputeAcceleration(forcesDesired\_);},
+        \end{align}
+        to obtain the body-frame acceleration \(\dot{\boldsymbol{\nu}}\);
+  \item the resulting acceleration is then integrated to update the body-frame
+        velocity, and the pose is integrated in the world frame using the
+        current rotation matrix and Euler angle rates.
+\end{itemize}
+
+For the thruster inputs, including their timestamps, we can make use of the ROS~2
+topic
+\begin{center}
+  \texttt{/auv/forces\_desired\_stamped},
+\end{center}
+whose type is
+\begin{center}
+  \texttt{auv\_core\_helper/msg/ThrusterForces}.
+\end{center}
+By subscribing to this topic, we obtain time-stamped thruster commands
+\(\boldsymbol{f}_{\text{thr}}(t)\), which can be fed directly into the
+\texttt{UnderwaterVehicleModel} via
+\(\boldsymbol{\tau}(t) = \mathbf{T}_{\mathrm{thr}} \boldsymbol{f}_{\text{thr}}(t)\).
+This is precisely the mechanism used in the existing simulation node and can be
+reused in the proposed estimator: the same thruster command stream that drives
+the simulator can be used as the input \(\mathbf{u}(t)\) of the Fossen-based
+process model \(\mathbf{f}_d(\mathbf{x},\mathbf{u})\) within the FAST-LIO
+framework.
+
+
 \end{document}

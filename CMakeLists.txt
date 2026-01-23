@@ -70,6 +70,11 @@ find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(visualization_msgs REQUIRED)
+find_package(auv_core_helper REQUIRED)
+find_package(ament_index_cpp REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(LIBCONFIGPP REQUIRED libconfig++)
+find_library(UNDERWATER_VEHICLE_MODEL NAMES underwater_vehicle_model REQUIRED)
 find_package(pcl_ros REQUIRED)
 find_package(pcl_conversions REQUIRED)
 option(FASTLIO_REQUIRE_LIVOX "Fail configuration if livox_ros_driver2 is missing" OFF)
@@ -87,6 +92,8 @@ set(dependencies
   visualization_msgs
   pcl_ros
   pcl_conversions
+  auv_core_helper
+  ament_index_cpp
 )
 
 set(FASTLIO_HAS_LIVOX FALSE)
@@ -119,7 +126,8 @@ ament_export_dependencies(rosidl_default_runtime)
 set(FASTLIO_SOURCES
   src/laserMapping.cpp
   include/ikd-Tree/ikd_Tree.cpp
-  src/preprocess.cpp)
+  src/preprocess.cpp
+  src/dynamics_bridge.cpp)
 
 if(FASTLIO_USE_CUDA)
   list(APPEND FASTLIO_SOURCES
@@ -133,8 +141,9 @@ target_include_directories(fastlio_mapping PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
   $<INSTALL_INTERFACE:include>
   ${PCL_INCLUDE_DIRS}
+  ${LIBCONFIGPP_INCLUDE_DIRS}
 )
-target_link_libraries(fastlio_mapping ${PCL_LIBRARIES} ${PYTHON_LIBRARIES} Eigen3::Eigen)
+target_link_libraries(fastlio_mapping ${PCL_LIBRARIES} ${PYTHON_LIBRARIES} Eigen3::Eigen ${UNDERWATER_VEHICLE_MODEL} ${LIBCONFIGPP_LIBRARIES})
 if(FASTLIO_USE_CUDA)
   target_link_libraries(fastlio_mapping CUDA::cudart CUDA::cublas CUDA::cusolver)
   target_include_directories(fastlio_mapping PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
