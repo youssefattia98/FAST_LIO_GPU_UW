@@ -48,6 +48,7 @@ class ImuProcess
   void set_gyr_bias_cov(const V3D &b_g);
   void set_acc_bias_cov(const V3D &b_a);
   void set_dynamics_trust(double trust);
+  void set_process_noise(const V3D &nv, const V3D &nw, const V3D &nbg, const V3D &nba);
   Eigen::Matrix<double, 12, 12> Q;
   void Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, PointCloudXYZI::Ptr pcl_un_);
 
@@ -58,6 +59,10 @@ class ImuProcess
   V3D cov_gyr_scale;
   V3D cov_bias_gyr;
   V3D cov_bias_acc;
+  V3D cov_proc_nv;
+  V3D cov_proc_nw;
+  V3D cov_proc_nbg;
+  V3D cov_proc_nba;
   double dynamics_model_trust_ = 1.0;
   double first_lidar_time;
 
@@ -93,6 +98,10 @@ ImuProcess::ImuProcess()
   cov_gyr       = V3D(0.1, 0.1, 0.1);
   cov_bias_gyr  = V3D(0.0001, 0.0001, 0.0001);
   cov_bias_acc  = V3D(0.0001, 0.0001, 0.0001);
+  cov_proc_nv   = V3D(0.0001, 0.0001, 0.0001);
+  cov_proc_nw   = V3D(0.0001, 0.0001, 0.0001);
+  cov_proc_nbg  = V3D(0.00001, 0.00001, 0.00001);
+  cov_proc_nba  = V3D(0.00001, 0.00001, 0.00001);
   mean_acc      = V3D(0, 0, -1.0);
   mean_gyr      = V3D(0, 0, 0);
   angvel_last     = Zero3d;
@@ -156,6 +165,14 @@ void ImuProcess::set_acc_bias_cov(const V3D &b_a)
   cov_bias_acc = b_a;
 }
 
+void ImuProcess::set_process_noise(const V3D &nv, const V3D &nw, const V3D &nbg, const V3D &nba)
+{
+  cov_proc_nv = nv;
+  cov_proc_nw = nw;
+  cov_proc_nbg = nbg;
+  cov_proc_nba = nba;
+}
+
 void ImuProcess::set_dynamics_trust(double trust)
 {
   dynamics_model_trust_ = std::max(0.0, std::min(1.0, trust));
@@ -198,7 +215,7 @@ void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 
     N ++;
   }
   state_ikfom init_state = kf_state.get_x();
-  init_state.grav = S2(- mean_acc / mean_acc.norm() * G_m_s2);
+  init_state.grav = (- mean_acc / mean_acc.norm() * G_m_s2);
   
   //state_inout.rot = Eye3d; // Exp(mean_acc.cross(V3D(0, 0, -1 / scale_gravity)));
   init_state.bg  = mean_gyr;
@@ -330,24 +347,23 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
       V3D grav_body = imu_state.rot.conjugate() * grav_world;
       V3D acc_body_lin(accel_body6(0), accel_body6(1), accel_body6(2));
       V3D specific_force_dyn = acc_body_lin + omega_body.cross(vel_body) - grav_body;
-      V3D acc_dyn_meas = specific_force_dyn + imu_state.ba;
-      in.acc = dynamics_model_trust_ * acc_dyn_meas + (1.0 - dynamics_model_trust_) * acc_avr;
+      in.acc = specific_force_dyn + imu_state.ba;
     }
     else
     {
       in.acc = acc_avr;
     }
     in.gyro = angvel_avr;
-    Q.block<3, 3>(0, 0).diagonal() = cov_gyr;
-    Q.block<3, 3>(3, 3).diagonal() = cov_acc;
-    Q.block<3, 3>(6, 6).diagonal() = cov_bias_gyr;
-    Q.block<3, 3>(9, 9).diagonal() = cov_bias_acc;
+    Q.block<3, 3>(0, 0).diagonal() = cov_proc_nv;
+    Q.block<3, 3>(3, 3).diagonal() = cov_proc_nw;
+    Q.block<3, 3>(6, 6).diagonal() = cov_proc_nbg;
+    Q.block<3, 3>(9, 9).diagonal() = cov_proc_nba;
     kf_state.predict(dt, Q, in);
 
     if (fastlio::dynamics::has_model())
     {
-      double trust = std::max(0.01, dynamics_model_trust_);
-      set_imu_accel_noise_diag(Eigen::Vector3d(cov_acc(0), cov_acc(1), cov_acc(2)) / trust);
+      double lambda_dyn = std::max(0.01, dynamics_model_trust_);
+      set_imu_accel_noise_diag(Eigen::Vector3d(cov_acc(0), cov_acc(1), cov_acc(2)) * lambda_dyn);
       set_imu_gyro_noise_diag(Eigen::Vector3d(cov_gyr(0), cov_gyr(1), cov_gyr(2)));
       double z_arr[3] = {acc_avr(0), acc_avr(1), acc_avr(2)};
       vect3 z_acc(z_arr, 3);

@@ -810,7 +810,7 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     double solve_start_  = omp_get_wtime();
     
     /*** Computation of Measuremnt Jacobian matrix H and measurents vector ***/
-    ekfom_data.h_x = MatrixXd::Zero(effct_feat_num, 26);
+    ekfom_data.h_x = MatrixXd::Zero(effct_feat_num, 27);
     ekfom_data.h.resize(effct_feat_num);
 
     for (int i = 0; i < effct_feat_num; i++)
@@ -833,13 +833,13 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
         if (extrinsic_est_en)
         {
             V3D B(point_be_crossmat * s.offset_R_L_I.conjugate() * C); //s.rot.conjugate()*norm_vec);
-            ekfom_data.h_x.block<1, 26>(i,0) << norm_p.x, norm_p.y, norm_p.z, VEC_FROM_ARRAY(A), VEC_FROM_ARRAY(B), VEC_FROM_ARRAY(C),
-                                                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0;
+            ekfom_data.h_x.block<1, 27>(i,0) << norm_p.x, norm_p.y, norm_p.z, VEC_FROM_ARRAY(A), VEC_FROM_ARRAY(B), VEC_FROM_ARRAY(C),
+                                                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0;
         }
         else
         {
-            ekfom_data.h_x.block<1, 26>(i,0) << norm_p.x, norm_p.y, norm_p.z, VEC_FROM_ARRAY(A), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                                                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0;
+            ekfom_data.h_x.block<1, 27>(i,0) << norm_p.x, norm_p.y, norm_p.z, VEC_FROM_ARRAY(A), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                                                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0;
         }
 
         /*** Measuremnt: distance to the closest surface/corner ***/
@@ -875,6 +875,10 @@ public:
         this->declare_parameter<double>("mapping.acc_cov", 0.1);
         this->declare_parameter<double>("mapping.b_gyr_cov", 0.0001);
         this->declare_parameter<double>("mapping.b_acc_cov", 0.0001);
+        this->declare_parameter<double>("mapping.process_noise.nv", 0.1);
+        this->declare_parameter<double>("mapping.process_noise.nw", 0.1);
+        this->declare_parameter<double>("mapping.process_noise.nbg", 0.0001);
+        this->declare_parameter<double>("mapping.process_noise.nba", 0.0001);
         this->declare_parameter<double>("preprocess.blind", 0.01);
         this->declare_parameter<int>("preprocess.lidar_type", AVIA);
         this->declare_parameter<int>("preprocess.scan_line", 16);
@@ -918,6 +922,14 @@ public:
         this->get_parameter_or<double>("mapping.acc_cov",acc_cov,0.1);
         this->get_parameter_or<double>("mapping.b_gyr_cov",b_gyr_cov,0.0001);
         this->get_parameter_or<double>("mapping.b_acc_cov",b_acc_cov,0.0001);
+        double proc_nv = acc_cov;
+        double proc_nw = gyr_cov;
+        double proc_nbg = b_gyr_cov;
+        double proc_nba = b_acc_cov;
+        this->get_parameter_or<double>("mapping.process_noise.nv", proc_nv, acc_cov);
+        this->get_parameter_or<double>("mapping.process_noise.nw", proc_nw, gyr_cov);
+        this->get_parameter_or<double>("mapping.process_noise.nbg", proc_nbg, b_gyr_cov);
+        this->get_parameter_or<double>("mapping.process_noise.nba", proc_nba, b_acc_cov);
         this->get_parameter_or<double>("preprocess.blind", p_pre->blind, 0.01);
         this->get_parameter_or<int>("preprocess.lidar_type", p_pre->lidar_type, AVIA);
         this->get_parameter_or<int>("preprocess.scan_line", p_pre->N_SCANS, 16);
@@ -980,6 +992,8 @@ public:
         p_imu->set_acc_cov(V3D(acc_cov, acc_cov, acc_cov));
         p_imu->set_gyr_bias_cov(V3D(b_gyr_cov, b_gyr_cov, b_gyr_cov));
         p_imu->set_acc_bias_cov(V3D(b_acc_cov, b_acc_cov, b_acc_cov));
+        p_imu->set_process_noise(V3D(proc_nv, proc_nv, proc_nv), V3D(proc_nw, proc_nw, proc_nw),
+                     V3D(proc_nbg, proc_nbg, proc_nbg), V3D(proc_nba, proc_nba, proc_nba));
         p_imu->set_dynamics_trust(dynamics_model_trust_);
 
         if (dynamics_enabled_)
@@ -1003,7 +1017,7 @@ public:
             }
         }
 
-        fill(epsi, epsi+26, 0.001);
+        fill(epsi, epsi+27, 0.001);
         kf.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
 
         /*** debug record ***/
@@ -1302,7 +1316,7 @@ private:
     int effect_feat_num = 0, frame_num = 0;
     double deltaT, deltaR, aver_time_consu = 0, aver_time_icp = 0, aver_time_match = 0, aver_time_incre = 0, aver_time_solve = 0, aver_time_const_H_time = 0;
     bool flg_EKF_converged, EKF_stop_flg = 0;
-    double epsi[26] = {0.001};
+    double epsi[27] = {0.001};
 
     FILE *fp;
     ofstream fout_pre, fout_out, fout_dbg;

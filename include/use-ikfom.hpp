@@ -7,7 +7,6 @@
 
 typedef MTK::vect<3, double> vect3;
 typedef MTK::SO3<double> SO3;
-typedef MTK::S2<double, 98090, 10000, 1> S2; 
 typedef MTK::vect<1, double> vect1;
 typedef MTK::vect<2, double> vect2;
 
@@ -35,7 +34,7 @@ MTK_BUILD_MANIFOLD(state_ikfom,
 ((vect3, omega))
 ((vect3, bg))
 ((vect3, ba))
-((S2, grav))
+((vect3, grav))
 );
 
 MTK_BUILD_MANIFOLD(input_ikfom,
@@ -120,9 +119,9 @@ Eigen::Matrix<double, 27, 1> get_f(state_ikfom &s, const input_ikfom &in)
 	return res;
 }
 
-Eigen::Matrix<double, 27, 26> df_dx(state_ikfom &s, const input_ikfom &in)
+Eigen::Matrix<double, 27, 27> df_dx(state_ikfom &s, const input_ikfom &in)
 {
-	Eigen::Matrix<double, 27, 26> cov = Eigen::Matrix<double, 27, 26>::Zero();
+	Eigen::Matrix<double, 27, 27> cov = Eigen::Matrix<double, 27, 27>::Zero();
 
 	// pos_dot = R * v_body
 	Eigen::Vector3d vel_body_eig(s.vel[0], s.vel[1], s.vel[2]);
@@ -136,10 +135,7 @@ Eigen::Matrix<double, 27, 26> df_dx(state_ikfom &s, const input_ikfom &in)
 
 	// vel_dot depends on accel bias and gravity (fallback model)
 	cov.template block<3, 3>(12, 21) = -Eigen::Matrix3d::Identity();
-	Eigen::Matrix<state_ikfom::scalar, 2, 1> vec = Eigen::Matrix<state_ikfom::scalar, 2, 1>::Zero();
-	Eigen::Matrix<state_ikfom::scalar, 3, 2> grav_matrix;
-	s.S2_Mx(grav_matrix, vec, 24);
-	cov.template block<3, 2>(12, 24) = s.rot.toRotationMatrix().transpose() * grav_matrix;
+	cov.template block<3, 3>(12, 24) = s.rot.toRotationMatrix().transpose();
 
 	return cov;
 }
@@ -195,7 +191,7 @@ vect3 SO3ToEuler(const SO3 &orient)
 
 inline vect3 h_imu_accel_share(state_ikfom &s, esekfom::dyn_runtime_share_datastruct<double> &dyn_share)
 {
-	dyn_share.h_x = Eigen::Matrix<double, 3, 26>::Zero();
+	dyn_share.h_x = Eigen::Matrix<double, 3, 27>::Zero();
 	dyn_share.h_v = Eigen::Matrix<double, 3, 3>::Identity();
 	dyn_share.R = g_imu_accel_noise_diag.asDiagonal();
 
@@ -227,11 +223,8 @@ inline vect3 h_imu_accel_share(state_ikfom &s, esekfom::dyn_runtime_share_datast
 	// Jacobian w.r.t. accel bias
 	dyn_share.h_x.template block<3, 3>(0, 21) = Eigen::Matrix3d::Identity();
 
-	// Jacobian w.r.t. gravity (S2, 2 DoF)
-	Eigen::Matrix<state_ikfom::scalar, 2, 1> vec = Eigen::Matrix<state_ikfom::scalar, 2, 1>::Zero();
-	Eigen::Matrix<state_ikfom::scalar, 3, 2> grav_matrix;
-	s.S2_Mx(grav_matrix, vec, 24);
-	dyn_share.h_x.template block<3, 2>(0, 24) = -s.rot.toRotationMatrix().transpose() * grav_matrix;
+	// Jacobian w.r.t. gravity vector
+	dyn_share.h_x.template block<3, 3>(0, 24) = -s.rot.toRotationMatrix().transpose();
 
 	double temp[3] = {accel_meas_pred(0), accel_meas_pred(1), accel_meas_pred(2)};
 	vect3 out(temp, 3);
@@ -240,7 +233,7 @@ inline vect3 h_imu_accel_share(state_ikfom &s, esekfom::dyn_runtime_share_datast
 
 inline vect3 h_imu_gyro_share(state_ikfom &s, esekfom::dyn_runtime_share_datastruct<double> &dyn_share)
 {
-	dyn_share.h_x = Eigen::Matrix<double, 3, 26>::Zero();
+	dyn_share.h_x = Eigen::Matrix<double, 3, 27>::Zero();
 	dyn_share.h_v = Eigen::Matrix<double, 3, 3>::Identity();
 	dyn_share.R = g_imu_gyro_noise_diag.asDiagonal();
 

@@ -12,7 +12,7 @@
         common:
             lid_topic:  "/IsaacSim/ThreeDSonar_LowFrequency"
             imu_topic:  "/auv/imu"
-            time_sync_en: false         # ONLY turn on when external time synchronization is really not possible
+            time_sync_en: true         # ONLY turn on when external time synchronization is really not possible
             time_offset_lidar_to_imu: 0.0 # Time offset between lidar and IMU calibrated by other algorithms, e.g. LI-Init (can be found in README).
                                         # This param will take effect no matter what time_sync_en is. So if the time offset is not known exactly, please set as 0.0
 
@@ -23,19 +23,19 @@
 
 
         mapping:
-            acc_cov: 0.0001
+            acc_cov: 0.00000000001
                 # Accelerometer measurement noise covariance.
                 # Controls how strongly linear acceleration is trusted in state propagation.
                 # Higher  -> trust accel less: smoother velocity/position, but increased translational lag.
                 # Lower   -> trust accel more: faster response to motion, but more noise and vibration in translation.
 
-            gyr_cov: 0.0001
+            gyr_cov: 0.00000000001
                 # Gyroscope measurement noise covariance.
                 # Controls how strongly angular rate measurements are trusted.
                 # Higher  -> trust gyro less: smoother attitude, but attitude (and thus translation) may lag.
                 # Lower   -> trust gyro more: faster attitude response, but increased orientation jitter.
 
-            b_acc_cov: 0.0001
+            b_acc_cov: 0.00000000001
                 # Accelerometer bias process noise (bias random-walk).
                 # Controls how quickly accelerometer bias is allowed to change over time.
                 # Higher  -> bias adapts faster: reduces long-term translation drift,
@@ -43,7 +43,7 @@
                 # Lower   -> bias adapts slowly: smoother estimates, but risk of steady-state
                 #            translational error accumulating between corrections.
 
-            b_gyr_cov: 0.0001
+            b_gyr_cov: 0.00000000001
                 # Gyroscope bias process noise (bias random-walk).
                 # Controls how quickly gyro bias is allowed to change.
                 # Higher  -> bias adapts faster: reduces attitude/yaw drift,
@@ -54,16 +54,22 @@
             det_range: 15.0     # max range of lidar points considered; raise to keep farther points, lower to ignore distant returns
             extrinsic_est_en:  true          
 
-            extrinsic_T: [ 0.0, 0.0, 0.0 ]
+            extrinsic_T: [ 0.2, 0.0, 0.2 ]
             extrinsic_R: [ 1., 0., 0.,
                         0., 1., 0.,
                         0., 0., 1.]
+
+            process_noise:
+                nv: 0.0   # linear acceleration process noise
+                nw: 0.0   # angular acceleration process noise
+                nbg: 0.0  # gyro bias random-walk
+                nba: 0.0  # accel bias random-walk
 
         dynamics:
             enable: true
             config_name: "BlueROV"  # maps to auv_core_helper/param/dynamic_model/<config_name>.conf
             forces_topic: "/auv/forces_desired_stamped"
-            model_trust: 1.0  # 1.0 = fully trust dynamics, 0.0 = ignore dynamics
+            model_trust: 1.0 # 1.0 = fully trust dynamics, 0.0 = ignore dynamics
 
         frames:
             map_frame: "World"

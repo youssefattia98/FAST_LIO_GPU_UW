@@ -157,42 +157,42 @@ We define the state on the manifold
 \begin{equation}
   \mathcal{M}_d
   =
-  SO(3)
-  \times \mathbb{R}^3
-  \times \mathbb{R}^3
-  \times \mathbb{R}^3
-  \times \mathbb{R}^3
-  \times \mathbb{R}^3
-  \times \mathbb{R}^3
-  \times SO(3)
-  \times \mathbb{R}^3,
+  \mathbb{R}^3
+  	imes SO(3)
+  	imes SO(3)
+  	imes \mathbb{R}^3
+  	imes \mathbb{R}^3
+  	imes \mathbb{R}^3
+  	imes \mathbb{R}^3
+  	imes \mathbb{R}^3
+  	imes \mathbb{R}^3,
 \end{equation}
 as
 \begin{equation}
   \mathbf{x}
   =
   \big(
-    \mathbf{R}^G_B,\;
     \mathbf{p}^G_B,\;
+    \mathbf{R}^G_B,\;
+    \mathbf{R}^B_L,\;
+    \mathbf{p}^B_L,\;
     \mathbf{v}^B,\;
     \boldsymbol{\omega}^B,\;
     \mathbf{b}_\omega,\;
     \mathbf{b}_a,\;
-    \mathbf{g}^G,\;
-    \mathbf{R}^B_L,\;
-    \mathbf{p}^B_L
+    \mathbf{g}^G
   \big)^\top
   \in \mathcal{M}_d,
   \label{eq:state_def}
 \end{equation}
 where
 \begin{itemize}
-  \item $\mathbf{R}^G_B \in SO(3)$ is the rotation from body to global frame,
   \item $\mathbf{p}^G_B \in \mathbb{R}^3$ is the body position,
+  \item $\mathbf{R}^G_B \in SO(3)$ is the rotation from body to global frame,
+  \item $\mathbf{R}^B_L \in SO(3)$, $\mathbf{p}^B_L \in \mathbb{R}^3$ are LiDAR extrinsics,
   \item $\mathbf{v}^B \in \mathbb{R}^3$ and $\boldsymbol{\omega}^B \in \mathbb{R}^3$ are body-frame linear and angular velocities,
   \item $\mathbf{b}_\omega, \mathbf{b}_a \in \mathbb{R}^3$ are gyroscope and accelerometer biases,
-  \item $\mathbf{g}^G \in \mathbb{R}^3$ is the gravity vector in the global frame,
-  \item $\mathbf{R}^B_L \in SO(3)$, $\mathbf{p}^B_L \in \mathbb{R}^3$ are LiDAR extrinsics.
+  \item $\mathbf{g}^G \in \mathbb{R}^3$ is the gravity vector in the global frame.
 \end{itemize}
 
 Let the input be the generalized forces
@@ -248,6 +248,11 @@ with components
   \dot{\mathbf{p}}^B_L = \mathbf{0}.
   \label{eq:f_d_extrinsics}
 \end{align}
+
+\paragraph{Implementation note.}
+In the actual implementation, $\mathbf{v}^B$ and $\boldsymbol{\omega}^B$ are explicit states
+and the dynamics model provides $\dot{\boldsymbol{\nu}}$ directly in the body frame.
+When dynamics are unavailable, the propagation falls back to IMU-specific force.
 
 The discrete-time propagation (e.g. explicit Euler) over a time step $\Delta t$ can be written as
 \begin{equation}
@@ -326,6 +331,12 @@ Collecting gyroscope and accelerometer into a single IMU measurement,
   \mathbf{h}_{\text{IMU}}(\mathbf{x}, \mathbf{u})
   + \mathbf{n}_{\text{IMU}},
 \end{equation}
+
+\paragraph{Implementation note.}
+The estimator applies two separate residual updates: one for
+$\boldsymbol{\omega}_m$ and one for $\mathbf{a}_m$. The dynamics trust scalar
+is applied by scaling the accelerometer covariance (or process noise), not by
+blending the measurement into the prediction.
 with
 \begin{equation}
   \mathbf{h}_{\text{IMU}}(\mathbf{x}, \mathbf{u})
@@ -470,6 +481,14 @@ reused in the proposed estimator: the same thruster command stream that drives
 the simulator can be used as the input \(\mathbf{u}(t)\) of the Fossen-based
 process model \(\mathbf{f}_d(\mathbf{x},\mathbf{u})\) within the FAST-LIO
 framework.
+
+\paragraph{Runtime configuration.}
+The dynamics model configuration is resolved via
+	exttt{ament\_index\_cpp} using
+	exttt{auv\_core\_helper/param/dynamic\_model/\{config\_name\}.conf}.
+The thruster topic name and a dynamics trust scalar are provided by ROS~2 parameters
+(see \texttt{config/WaterLinked.yaml}), allowing the estimator to blend
+the dynamics-based specific force with raw IMU accelerometer data.
 
 
 \end{document}
