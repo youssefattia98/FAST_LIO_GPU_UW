@@ -14,6 +14,9 @@ vect3 SO3ToEuler(const SO3 &orient);
 
 inline Eigen::Vector3d g_imu_accel_noise_diag = Eigen::Vector3d(0.1, 0.1, 0.1);
 inline Eigen::Vector3d g_imu_gyro_noise_diag = Eigen::Vector3d(0.1, 0.1, 0.1);
+inline Eigen::Matrix3d g_dvl_meas_cov = Eigen::Matrix3d::Identity();
+inline Eigen::Matrix3d g_dvl_R_b_d = Eigen::Matrix3d::Identity();
+inline Eigen::Vector3d g_dvl_r_bd_b = Eigen::Vector3d::Zero();
 
 inline void set_imu_accel_noise_diag(const Eigen::Vector3d &diag)
 {
@@ -23,6 +26,17 @@ inline void set_imu_accel_noise_diag(const Eigen::Vector3d &diag)
 inline void set_imu_gyro_noise_diag(const Eigen::Vector3d &diag)
 {
 	g_imu_gyro_noise_diag = diag;
+}
+
+inline void set_dvl_cov(const Eigen::Matrix3d &cov)
+{
+	g_dvl_meas_cov = cov;
+}
+
+inline void set_dvl_mount(const Eigen::Vector3d &r_bd_b, const Eigen::Matrix3d &R_b_d)
+{
+	g_dvl_r_bd_b = r_bd_b;
+	g_dvl_R_b_d = R_b_d;
 }
 
 MTK_BUILD_MANIFOLD(state_ikfom,
@@ -35,6 +49,7 @@ MTK_BUILD_MANIFOLD(state_ikfom,
 ((vect3, bg))
 ((vect3, ba))
 ((vect3, grav))
+((vect3, b_dvl))
 );
 
 MTK_BUILD_MANIFOLD(input_ikfom,
@@ -47,6 +62,7 @@ MTK_BUILD_MANIFOLD(process_noise_ikfom,
 ((vect3, nw))
 ((vect3, nbg))
 ((vect3, nba))
+((vect3, nb_dvl))
 );
 
 MTK::get_cov<process_noise_ikfom>::type process_noise_cov()
@@ -56,14 +72,15 @@ MTK::get_cov<process_noise_ikfom>::type process_noise_cov()
 	MTK::setDiagonal<process_noise_ikfom, vect3, 3>(cov, &process_noise_ikfom::nw, 0.0001); // angular accel noise
 	MTK::setDiagonal<process_noise_ikfom, vect3, 6>(cov, &process_noise_ikfom::nbg, 0.00001); // *dt 0.00001 0.00001 * dt *dt 0.3 //0.001 0.0001 0.01
 	MTK::setDiagonal<process_noise_ikfom, vect3, 9>(cov, &process_noise_ikfom::nba, 0.00001);   //0.001 0.05 0.0001/out 0.01
+	MTK::setDiagonal<process_noise_ikfom, vect3, 12>(cov, &process_noise_ikfom::nb_dvl, 0.00001);
 	return cov;
 }
 
 //double L_offset_to_I[3] = {0.04165, 0.02326, -0.0284}; // Avia 
 //vect3 Lidar_offset_to_IMU(L_offset_to_I, 3);
-Eigen::Matrix<double, 27, 1> get_f(state_ikfom &s, const input_ikfom &in)
+Eigen::Matrix<double, 30, 1> get_f(state_ikfom &s, const input_ikfom &in)
 {
-	Eigen::Matrix<double, 27, 1> res = Eigen::Matrix<double, 27, 1>::Zero();
+	Eigen::Matrix<double, 30, 1> res = Eigen::Matrix<double, 30, 1>::Zero();
 
 	vect3 omega_meas;
 	in.gyro.boxminus(omega_meas, s.bg);
@@ -119,9 +136,9 @@ Eigen::Matrix<double, 27, 1> get_f(state_ikfom &s, const input_ikfom &in)
 	return res;
 }
 
-Eigen::Matrix<double, 27, 27> df_dx(state_ikfom &s, const input_ikfom &in)
+Eigen::Matrix<double, 30, 30> df_dx(state_ikfom &s, const input_ikfom &in)
 {
-	Eigen::Matrix<double, 27, 27> cov = Eigen::Matrix<double, 27, 27>::Zero();
+	Eigen::Matrix<double, 30, 30> cov = Eigen::Matrix<double, 30, 30>::Zero();
 
 	// pos_dot = R * v_body
 	Eigen::Vector3d vel_body_eig(s.vel[0], s.vel[1], s.vel[2]);
@@ -141,15 +158,17 @@ Eigen::Matrix<double, 27, 27> df_dx(state_ikfom &s, const input_ikfom &in)
 }
 
 
-Eigen::Matrix<double, 27, 12> df_dw(state_ikfom &s, const input_ikfom &in)
+Eigen::Matrix<double, 30, 15> df_dw(state_ikfom &s, const input_ikfom &in)
 {
-	Eigen::Matrix<double, 27, 12> cov = Eigen::Matrix<double, 27, 12>::Zero();
+	Eigen::Matrix<double, 30, 15> cov = Eigen::Matrix<double, 30, 15>::Zero();
 	// velocity and omega process noise
 	cov.template block<3, 3>(12, 0) = Eigen::Matrix3d::Identity();
 	cov.template block<3, 3>(15, 3) = Eigen::Matrix3d::Identity();
 	// bias random walks
 	cov.template block<3, 3>(18, 6) = Eigen::Matrix3d::Identity();
 	cov.template block<3, 3>(21, 9) = Eigen::Matrix3d::Identity();
+	// dvl bias random walk
+	cov.template block<3, 3>(27, 12) = Eigen::Matrix3d::Identity();
 	return cov;
 }
 
@@ -191,7 +210,7 @@ vect3 SO3ToEuler(const SO3 &orient)
 
 inline vect3 h_imu_accel_share(state_ikfom &s, esekfom::dyn_runtime_share_datastruct<double> &dyn_share)
 {
-	dyn_share.h_x = Eigen::Matrix<double, 3, 27>::Zero();
+	dyn_share.h_x = Eigen::Matrix<double, 3, 30>::Zero();
 	dyn_share.h_v = Eigen::Matrix<double, 3, 3>::Identity();
 	dyn_share.R = g_imu_accel_noise_diag.asDiagonal();
 
@@ -233,7 +252,7 @@ inline vect3 h_imu_accel_share(state_ikfom &s, esekfom::dyn_runtime_share_datast
 
 inline vect3 h_imu_gyro_share(state_ikfom &s, esekfom::dyn_runtime_share_datastruct<double> &dyn_share)
 {
-	dyn_share.h_x = Eigen::Matrix<double, 3, 27>::Zero();
+	dyn_share.h_x = Eigen::Matrix<double, 3, 30>::Zero();
 	dyn_share.h_v = Eigen::Matrix<double, 3, 3>::Identity();
 	dyn_share.R = g_imu_gyro_noise_diag.asDiagonal();
 
@@ -244,6 +263,30 @@ inline vect3 h_imu_gyro_share(state_ikfom &s, esekfom::dyn_runtime_share_datastr
 	dyn_share.h_x.template block<3, 3>(0, 18) = Eigen::Matrix3d::Identity();
 
 	double temp[3] = {gyro_pred(0), gyro_pred(1), gyro_pred(2)};
+	vect3 out(temp, 3);
+	return out;
+}
+
+inline vect3 h_dvl_share(state_ikfom &s, esekfom::dyn_runtime_share_datastruct<double> &dyn_share)
+{
+	dyn_share.h_x = Eigen::Matrix<double, 3, 30>::Zero();
+	dyn_share.h_v = Eigen::Matrix<double, 3, 3>::Identity();
+	dyn_share.R = g_dvl_meas_cov;
+
+	Eigen::Vector3d vel_body(s.vel[0], s.vel[1], s.vel[2]);
+	Eigen::Vector3d omega_body(s.omega[0], s.omega[1], s.omega[2]);
+	Eigen::Vector3d v_dvl_body = vel_body + omega_body.cross(g_dvl_r_bd_b);
+	Eigen::Vector3d z_pred = g_dvl_R_b_d * v_dvl_body + Eigen::Vector3d(s.b_dvl[0], s.b_dvl[1], s.b_dvl[2]);
+
+	vect3 r_bd;
+	r_bd << g_dvl_r_bd_b(0), g_dvl_r_bd_b(1), g_dvl_r_bd_b(2);
+	Eigen::Matrix3d skew_r = MTK::hat(r_bd);
+
+	dyn_share.h_x.template block<3, 3>(0, 12) = g_dvl_R_b_d;
+	dyn_share.h_x.template block<3, 3>(0, 15) = -g_dvl_R_b_d * skew_r;
+	dyn_share.h_x.template block<3, 3>(0, 27) = Eigen::Matrix3d::Identity();
+
+	double temp[3] = {z_pred(0), z_pred(1), z_pred(2)};
 	vect3 out(temp, 3);
 	return out;
 }

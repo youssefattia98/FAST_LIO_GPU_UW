@@ -9,6 +9,7 @@
 #include <sensor_msgs/msg/imu.hpp>
 #include <auv_core_helper/msg/thruster_forces.hpp>
 #include <nav_msgs/msg/odometry.hpp>
+#include <geometry_msgs/msg/twist_with_covariance_stamped.hpp>
 
 using namespace std;
 using namespace Eigen;
@@ -63,6 +64,7 @@ struct MeasureGroup     // Lidar data and imu dates for the curent process
     PointCloudXYZI::Ptr lidar;
     deque<sensor_msgs::msg::Imu::ConstSharedPtr> imu;
     deque<auv_core_helper::msg::ThrusterForces::ConstSharedPtr> thruster_forces;
+    deque<geometry_msgs::msg::TwistWithCovarianceStamped::ConstSharedPtr> dvl;
 };
 
 struct StatesGroup
