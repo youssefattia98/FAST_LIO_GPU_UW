@@ -60,16 +60,27 @@
                         0., 0., 1.]
 
             process_noise:
-                nv: 0.0   # linear acceleration process noise
-                nw: 0.0   # angular acceleration process noise
-                nbg: 0.0  # gyro bias random-walk
-                nba: 0.0  # accel bias random-walk
+                nv:  0.00000000001   # linear acceleration process noise
+                nw:  0.00000000001   # angular acceleration process noise
+                nbg:  0.00000000001  # gyro bias random-walk
+                nba:  0.00000000001  # accel bias random-walk
+                nb_dvl:  0.0001 # DVL bias random-walk
 
         dynamics:
             enable: true
             config_name: "BlueROV"  # maps to auv_core_helper/param/dynamic_model/<config_name>.conf
             forces_topic: "/auv/forces_desired_stamped"
             model_trust: 1.0 # 1.0 = fully trust dynamics, 0.0 = ignore dynamics
+
+        dvl:
+            enable: true
+            topic: "/auv/dvl"
+            extrinsic_T: [ 0.0, 0.0, 0.0 ]
+            extrinsic_R: [ 1., 0., 0.,
+                        0., 1., 0.,
+                        0., 0., 1.]
+            covariance_floor_std: 0.02
+            min_speed: 0.0
 
         frames:
             map_frame: "World"
