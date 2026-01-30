@@ -63,13 +63,13 @@
 #include <pcl/io/pcd_io.h>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/msg/imu.hpp>
+#include <sensor_msgs/msg/joint_state.hpp>
 #include <std_srvs/srv/trigger.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 #include <tf2_ros/static_transform_broadcaster.h>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <geometry_msgs/msg/vector3.hpp>
-#include <geometry_msgs/msg/twist_with_covariance_stamped.hpp>
-#include <auv_core_helper/msg/thruster_forces.hpp>
+#include <geometry_msgs/msg/vector3_stamped.hpp>
 #ifdef FASTLIO_HAS_LIVOX
 #include <livox_ros_driver2/msg/custom_msg.hpp>
 #endif
@@ -134,8 +134,8 @@ vector<double>       dvl_extrinR(9, 0.0);
 deque<double>                     time_buffer;
 deque<PointCloudXYZI::Ptr>        lidar_buffer;
 deque<sensor_msgs::msg::Imu::ConstSharedPtr> imu_buffer;
-deque<auv_core_helper::msg::ThrusterForces::ConstSharedPtr> thruster_buffer;
-deque<geometry_msgs::msg::TwistWithCovarianceStamped::ConstSharedPtr> dvl_buffer;
+deque<sensor_msgs::msg::JointState::ConstSharedPtr> thruster_buffer;
+deque<geometry_msgs::msg::Vector3Stamped::ConstSharedPtr> dvl_buffer;
 
 PointCloudXYZI::Ptr featsFromMap(new PointCloudXYZI());
 PointCloudXYZI::Ptr feats_undistort(new PointCloudXYZI());
@@ -412,9 +412,9 @@ void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in)
     sig_buffer.notify_all();
 }
 
-void thruster_cbk(const auv_core_helper::msg::ThrusterForces::UniquePtr msg_in)
+void thruster_cbk(const sensor_msgs::msg::JointState::UniquePtr msg_in)
 {
-    auto msg = auv_core_helper::msg::ThrusterForces::SharedPtr(new auv_core_helper::msg::ThrusterForces(*msg_in));
+    auto msg = sensor_msgs::msg::JointState::SharedPtr(new sensor_msgs::msg::JointState(*msg_in));
     double timestamp = get_time_sec(msg->header.stamp);
 
     mtx_buffer.lock();
@@ -432,10 +432,10 @@ void thruster_cbk(const auv_core_helper::msg::ThrusterForces::UniquePtr msg_in)
     sig_buffer.notify_all();
 }
 
-void dvl_cbk(const geometry_msgs::msg::TwistWithCovarianceStamped::UniquePtr msg_in)
+void dvl_cbk(const geometry_msgs::msg::Vector3Stamped::UniquePtr msg_in)
 {
-    auto msg = geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr(
-        new geometry_msgs::msg::TwistWithCovarianceStamped(*msg_in));
+    auto msg = geometry_msgs::msg::Vector3Stamped::SharedPtr(
+        new geometry_msgs::msg::Vector3Stamped(*msg_in));
     double timestamp = get_time_sec(msg->header.stamp);
 
     mtx_buffer.lock();
@@ -1125,10 +1125,10 @@ public:
             sub_pcl_pc_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(lid_topic, rclcpp::SensorDataQoS(), standard_pcl_cbk);
         }
         sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(imu_topic, rclcpp::SensorDataQoS(), imu_cbk);
-        sub_thrusters_ = this->create_subscription<auv_core_helper::msg::ThrusterForces>(dynamics_forces_topic_, 50, thruster_cbk);
+        sub_thrusters_ = this->create_subscription<sensor_msgs::msg::JointState>(dynamics_forces_topic_, 50, thruster_cbk);
         if (dvl_enabled)
         {
-            sub_dvl_ = this->create_subscription<geometry_msgs::msg::TwistWithCovarianceStamped>(dvl_topic, 50, dvl_cbk);
+            sub_dvl_ = this->create_subscription<geometry_msgs::msg::Vector3Stamped>(dvl_topic, 50, dvl_cbk);
         }
         pubLaserCloudFull_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered", 20);
         pubLaserCloudFull_body_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered_body", 20);
@@ -1198,7 +1198,7 @@ private:
             {
                 for (const auto &dvl_msg : Measures.dvl)
                 {
-                    const auto &lin = dvl_msg->twist.twist.linear;
+                    const auto &lin = dvl_msg->vector;
                     if (!std::isfinite(lin.x) || !std::isfinite(lin.y) || !std::isfinite(lin.z))
                     {
                         continue;
@@ -1210,17 +1210,10 @@ private:
                         continue;
                     }
 
-                    const auto &cov = dvl_msg->twist.covariance;
-                    double var_x = cov[0];
-                    double var_y = cov[7];
-                    double var_z = cov[14];
                     double floor_var = dvl_cov_floor_std * dvl_cov_floor_std;
-                    if (!std::isfinite(var_x) || var_x <= 0.0) var_x = floor_var;
-                    if (!std::isfinite(var_y) || var_y <= 0.0) var_y = floor_var;
-                    if (!std::isfinite(var_z) || var_z <= 0.0) var_z = floor_var;
-                    var_x = std::max(var_x, floor_var);
-                    var_y = std::max(var_y, floor_var);
-                    var_z = std::max(var_z, floor_var);
+                    double var_x = floor_var;
+                    double var_y = floor_var;
+                    double var_z = floor_var;
 
                     Eigen::Matrix3d R_dvl = Eigen::Matrix3d::Zero();
                     R_dvl(0, 0) = var_x;
@@ -1415,8 +1408,8 @@ private:
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu_;
-    rclcpp::Subscription<auv_core_helper::msg::ThrusterForces>::SharedPtr sub_thrusters_;
-    rclcpp::Subscription<geometry_msgs::msg::TwistWithCovarianceStamped>::SharedPtr sub_dvl_;
+    rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr sub_thrusters_;
+    rclcpp::Subscription<geometry_msgs::msg::Vector3Stamped>::SharedPtr sub_dvl_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_pcl_pc_;
 #ifdef FASTLIO_HAS_LIVOX
     rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr sub_pcl_livox_;

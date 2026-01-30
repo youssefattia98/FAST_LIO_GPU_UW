@@ -269,10 +269,11 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
   {
     ThrusterSample sample;
     sample.stamp = rclcpp::Time(thr_msg->header.stamp).seconds();
-    sample.forces.resize(static_cast<long>(thr_msg->forces.size()));
-    for (size_t i = 0; i < thr_msg->forces.size(); ++i)
+    const auto &effort = thr_msg->effort;
+    sample.forces.resize(static_cast<long>(effort.size()));
+    for (size_t i = 0; i < effort.size(); ++i)
     {
-      sample.forces(static_cast<long>(i)) = thr_msg->forces[i];
+      sample.forces(static_cast<long>(i)) = effort[i];
     }
     thr_samples.push_back(std::move(sample));
   }

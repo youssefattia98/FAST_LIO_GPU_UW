@@ -11,15 +11,16 @@
 
         common:
             lid_topic:  "/IsaacSim/ThreeDSonar_LowFrequency"
-            imu_topic:  "/auv/imu"
-            time_sync_en: true         # ONLY turn on when external time synchronization is really not possible
+            imu_topic:  "/IsaacSim/imu"
+            time_sync_en: false         # ONLY turn on when external time synchronization is really not possible
             time_offset_lidar_to_imu: 0.0 # Time offset between lidar and IMU calibrated by other algorithms, e.g. LI-Init (can be found in README).
                                         # This param will take effect no matter what time_sync_en is. So if the time offset is not known exactly, please set as 0.0
 
         preprocess:
             lidar_type: 5                # 1: Livox, 2: Velodyne, 3: Ouster, 4: Mid360, 5: WaterLinked solid-state
             scan_line: 32                # number of scan lines of the LiDAR 
-            blind: 0.2             
+            blind: 0.2
+            scan_rate: 100         
 
 
         mapping:
@@ -69,12 +70,12 @@
         dynamics:
             enable: true
             config_name: "BlueROV"  # maps to auv_core_helper/param/dynamic_model/<config_name>.conf
-            forces_topic: "/auv/forces_desired_stamped"
+            forces_topic: "/IsaacSim/forces_actual"
             model_trust: 1.0 # 1.0 = fully trust dynamics, 0.0 = ignore dynamics
 
         dvl:
-            enable: true
-            topic: "/auv/dvl"
+            enable: false
+            topic: "/IsaacSim/dvl"
             extrinsic_T: [ 0.0, 0.0, 0.0 ]
             extrinsic_R: [ 1., 0., 0.,
                         0., 1., 0.,

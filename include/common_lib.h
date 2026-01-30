@@ -7,9 +7,9 @@
 #include <pcl/point_cloud.h>
 #include <fast_lio/msg/pose6_d.hpp>
 #include <sensor_msgs/msg/imu.hpp>
-#include <auv_core_helper/msg/thruster_forces.hpp>
+#include <sensor_msgs/msg/joint_state.hpp>
 #include <nav_msgs/msg/odometry.hpp>
-#include <geometry_msgs/msg/twist_with_covariance_stamped.hpp>
+#include <geometry_msgs/msg/vector3_stamped.hpp>
 
 using namespace std;
 using namespace Eigen;
@@ -63,8 +63,8 @@ struct MeasureGroup     // Lidar data and imu dates for the curent process
     double lidar_end_time;
     PointCloudXYZI::Ptr lidar;
     deque<sensor_msgs::msg::Imu::ConstSharedPtr> imu;
-    deque<auv_core_helper::msg::ThrusterForces::ConstSharedPtr> thruster_forces;
-    deque<geometry_msgs::msg::TwistWithCovarianceStamped::ConstSharedPtr> dvl;
+    deque<sensor_msgs::msg::JointState::ConstSharedPtr> thruster_forces;
+    deque<geometry_msgs::msg::Vector3Stamped::ConstSharedPtr> dvl;
 };
 
 struct StatesGroup

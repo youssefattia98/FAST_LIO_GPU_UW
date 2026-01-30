@@ -104,7 +104,7 @@ Clone the repository and colcon build:
     ```
 3. Build the package with CUDA kernels enabled:
     ```bash
-    colcon build --packages-select fast_lio --cmake-args -DFASTLIO_USE_CUDA=ON -DCMAKE_BUILD_TYPE=Release
+    colcon build --packages-select fast_lio --cmake-args -DFASTLIO_USE_CUDA=OFF -DCMAKE_BUILD_TYPE=Release -DFASTLIO_REQUIRE_LIVOX=OFF
     ```
 
 If the CUDA toolkit is not available the build will stop with `No CMAKE_CUDA_COMPILER could be found`. Rebuild with `FASTLIO_USE_CUDA=OFF` (default) or install the toolkit before retrying.
