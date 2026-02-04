@@ -14,6 +14,7 @@ vect3 SO3ToEuler(const SO3 &orient);
 
 inline Eigen::Vector3d g_imu_accel_noise_diag = Eigen::Vector3d(0.1, 0.1, 0.1);
 inline Eigen::Vector3d g_imu_gyro_noise_diag = Eigen::Vector3d(0.1, 0.1, 0.1);
+inline Eigen::Vector3d g_thruster_accel_noise_diag = Eigen::Vector3d(0.1, 0.1, 0.1);
 inline Eigen::Matrix3d g_dvl_meas_cov = Eigen::Matrix3d::Identity();
 inline Eigen::Matrix3d g_dvl_R_b_d = Eigen::Matrix3d::Identity();
 inline Eigen::Vector3d g_dvl_r_bd_b = Eigen::Vector3d::Zero();
@@ -26,6 +27,11 @@ inline void set_imu_accel_noise_diag(const Eigen::Vector3d &diag)
 inline void set_imu_gyro_noise_diag(const Eigen::Vector3d &diag)
 {
 	g_imu_gyro_noise_diag = diag;
+}
+
+inline void set_thruster_accel_noise_diag(const Eigen::Vector3d &diag)
+{
+	g_thruster_accel_noise_diag = diag;
 }
 
 inline void set_dvl_cov(const Eigen::Matrix3d &cov)
@@ -246,6 +252,44 @@ inline vect3 h_imu_accel_share(state_ikfom &s, esekfom::dyn_runtime_share_datast
 	dyn_share.h_x.template block<3, 3>(0, 24) = -s.rot.toRotationMatrix().transpose();
 
 	double temp[3] = {accel_meas_pred(0), accel_meas_pred(1), accel_meas_pred(2)};
+	vect3 out(temp, 3);
+	return out;
+}
+
+inline vect3 h_thruster_accel_share(state_ikfom &s, esekfom::dyn_runtime_share_datastruct<double> &dyn_share)
+{
+	dyn_share.h_x = Eigen::Matrix<double, 3, 30>::Zero();
+	dyn_share.h_v = Eigen::Matrix<double, 3, 3>::Identity();
+	dyn_share.R = g_thruster_accel_noise_diag.asDiagonal();
+
+	Eigen::Vector3d vel_body(s.vel[0], s.vel[1], s.vel[2]);
+	Eigen::Vector3d omega_body(s.omega[0], s.omega[1], s.omega[2]);
+
+	Eigen::Matrix<double, 6, 1> vel_body6;
+	vel_body6 << vel_body(0), vel_body(1), vel_body(2), omega_body(0), omega_body(1), omega_body(2);
+
+	vect3 euler_deg = SO3ToEuler(s.rot);
+	constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
+	Eigen::Vector3d euler_rad(euler_deg[0] * kDegToRad, euler_deg[1] * kDegToRad, euler_deg[2] * kDegToRad);
+	Eigen::Matrix<double, 6, 1> pose_world6;
+	pose_world6 << s.pos[0], s.pos[1], s.pos[2], euler_rad(0), euler_rad(1), euler_rad(2);
+
+	Eigen::Vector3d accel_body = Eigen::Vector3d::Zero();
+	Eigen::Matrix<double, 6, 1> accel_body6;
+	if (fastlio::dynamics::compute_body_accel(vel_body6, pose_world6, accel_body6))
+	{
+		accel_body = accel_body6.head<3>();
+	}
+
+	Eigen::Vector3d grav_world(s.grav[0], s.grav[1], s.grav[2]);
+	Eigen::Vector3d grav_body = s.rot.toRotationMatrix().transpose() * grav_world;
+
+	Eigen::Vector3d specific_force = accel_body + omega_body.cross(vel_body) - grav_body;
+
+	// Jacobian w.r.t. gravity vector
+	dyn_share.h_x.template block<3, 3>(0, 24) = -s.rot.toRotationMatrix().transpose();
+
+	double temp[3] = {specific_force(0), specific_force(1), specific_force(2)};
 	vect3 out(temp, 3);
 	return out;
 }

@@ -48,6 +48,7 @@ class ImuProcess
   void set_gyr_bias_cov(const V3D &b_g);
   void set_acc_bias_cov(const V3D &b_a);
   void set_dynamics_trust(double trust);
+  void set_thruster_meas(bool enable, const V3D &cov);
   void set_process_noise(const V3D &nv, const V3D &nw, const V3D &nbg, const V3D &nba, const V3D &nb_dvl);
   Eigen::Matrix<double, 15, 15> Q;
   void Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 15, input_ikfom> &kf_state, PointCloudXYZI::Ptr pcl_un_);
@@ -65,6 +66,8 @@ class ImuProcess
   V3D cov_proc_nba;
   V3D cov_proc_nb_dvl;
   double dynamics_model_trust_ = 1.0;
+  bool thruster_meas_en_ = false;
+  V3D thruster_acc_cov_ = V3D(0.1, 0.1, 0.1);
   double first_lidar_time;
 
  private:
@@ -179,6 +182,13 @@ void ImuProcess::set_process_noise(const V3D &nv, const V3D &nw, const V3D &nbg,
 void ImuProcess::set_dynamics_trust(double trust)
 {
   dynamics_model_trust_ = std::max(0.0, std::min(1.0, trust));
+}
+
+void ImuProcess::set_thruster_meas(bool enable, const V3D &cov)
+{
+  thruster_meas_en_ = enable;
+  thruster_acc_cov_ = cov;
+  set_thruster_accel_noise_diag(Eigen::Vector3d(cov(0), cov(1), cov(2)));
 }
 
 void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 15, input_ikfom> &kf_state, int &N)
@@ -346,14 +356,17 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
     Eigen::Matrix<double, 6, 1> pose_world6;
     pose_world6 << imu_state.pos(0), imu_state.pos(1), imu_state.pos(2), euler_rad(0), euler_rad(1), euler_rad(2);
 
+    bool dyn_acc_valid = false;
+    V3D specific_force_dyn = acc_avr;
     Eigen::Matrix<double, 6, 1> accel_body6;
     if (fastlio::dynamics::compute_body_accel(vel_body6, pose_world6, accel_body6))
     {
       V3D grav_world(imu_state.grav[0], imu_state.grav[1], imu_state.grav[2]);
       V3D grav_body = imu_state.rot.conjugate() * grav_world;
       V3D acc_body_lin(accel_body6(0), accel_body6(1), accel_body6(2));
-      V3D specific_force_dyn = acc_body_lin + omega_body.cross(vel_body) - grav_body;
+      specific_force_dyn = acc_body_lin + omega_body.cross(vel_body) - grav_body;
       in.acc = specific_force_dyn + imu_state.ba;
+      dyn_acc_valid = true;
     }
     else
     {
@@ -378,6 +391,12 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
       double z_gyr_arr[3] = {angvel_avr(0), angvel_avr(1), angvel_avr(2)};
       vect3 z_gyr(z_gyr_arr, 3);
       kf_state.update_iterated_dyn_runtime_share(z_gyr, h_imu_gyro_share);
+    }
+    if (thruster_meas_en_ && dyn_acc_valid)
+    {
+      double z_thr_arr[3] = {specific_force_dyn(0), specific_force_dyn(1), specific_force_dyn(2)};
+      vect3 z_thr(z_thr_arr, 3);
+      kf_state.update_iterated_dyn_runtime_share(z_thr, h_thruster_accel_share);
     }
 
     /* save the poses at each IMU measurements */

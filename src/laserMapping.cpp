@@ -947,6 +947,8 @@ public:
         this->declare_parameter<string>("dynamics.config_name", "default_value");
         this->declare_parameter<string>("dynamics.forces_topic", "/auv/forces_desired_stamped");
         this->declare_parameter<double>("dynamics.model_trust", 1.0);
+        this->declare_parameter<bool>("dynamics.thruster_meas_en", false);
+        this->declare_parameter<double>("dynamics.thruster_acc_cov", 0.1);
     this->declare_parameter<string>("frames.map_frame", map_frame_id);
     this->declare_parameter<string>("frames.odom_frame", odom_frame_id);
     this->declare_parameter<string>("frames.body_frame", body_frame_id);
@@ -1006,6 +1008,8 @@ public:
         this->get_parameter_or<string>("dynamics.config_name", dynamics_config_name_, "default_value");
         this->get_parameter_or<string>("dynamics.forces_topic", dynamics_forces_topic_, "/auv/forces_desired_stamped");
         this->get_parameter_or<double>("dynamics.model_trust", dynamics_model_trust_, 1.0);
+        this->get_parameter_or<bool>("dynamics.thruster_meas_en", thruster_meas_en_, false);
+        this->get_parameter_or<double>("dynamics.thruster_acc_cov", thruster_acc_cov_, 0.1);
         this->get_parameter_or<string>("frames.map_frame", map_frame_id, map_frame_id);
         this->get_parameter_or<string>("frames.odom_frame", odom_frame_id, odom_frame_id);
         this->get_parameter_or<string>("frames.body_frame", body_frame_id, body_frame_id);
@@ -1055,6 +1059,8 @@ public:
                      V3D(proc_nbg, proc_nbg, proc_nbg), V3D(proc_nba, proc_nba, proc_nba),
                      V3D(proc_nb_dvl, proc_nb_dvl, proc_nb_dvl));
         p_imu->set_dynamics_trust(dynamics_model_trust_);
+        p_imu->set_thruster_meas(thruster_meas_en_,
+                                 V3D(thruster_acc_cov_, thruster_acc_cov_, thruster_acc_cov_));
 
         if (dvl_extrinT.size() != 3)
         {
@@ -1425,6 +1431,8 @@ private:
     std::string dynamics_config_name_;
     std::string dynamics_forces_topic_;
     double dynamics_model_trust_ = 1.0;
+    bool thruster_meas_en_ = false;
+    double thruster_acc_cov_ = 0.1;
     std::shared_ptr<mvm::UnderwaterVehicleModel> dynamics_model_;
 
     bool effect_pub_en = false, map_pub_en = false;

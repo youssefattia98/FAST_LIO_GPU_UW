@@ -10,7 +10,7 @@
         # map_file_path: "/home/attia/bags/dvl/rosbag2_2025_12_18-16_05_57/map.pcd"    # map save/load path; change to redirect outputs
 
         common:
-            lid_topic:  "/IsaacSim/ThreeDSonar_LowFrequency"
+            lid_topic:  "/IsaacSim/ThreeDSonarLowFrequency"
             imu_topic:  "/IsaacSim/imu"
             time_sync_en: false         # ONLY turn on when external time synchronization is really not possible
             time_offset_lidar_to_imu: 0.0 # Time offset between lidar and IMU calibrated by other algorithms, e.g. LI-Init (can be found in README).
@@ -24,19 +24,19 @@
 
 
         mapping:
-            acc_cov: 0.00000000001
+            acc_cov: 0.01
                 # Accelerometer measurement noise covariance.
                 # Controls how strongly linear acceleration is trusted in state propagation.
                 # Higher  -> trust accel less: smoother velocity/position, but increased translational lag.
                 # Lower   -> trust accel more: faster response to motion, but more noise and vibration in translation.
 
-            gyr_cov: 0.00000000001
+            gyr_cov: 0.01
                 # Gyroscope measurement noise covariance.
                 # Controls how strongly angular rate measurements are trusted.
                 # Higher  -> trust gyro less: smoother attitude, but attitude (and thus translation) may lag.
                 # Lower   -> trust gyro more: faster attitude response, but increased orientation jitter.
 
-            b_acc_cov: 0.00000000001
+            b_acc_cov: 0.01
                 # Accelerometer bias process noise (bias random-walk).
                 # Controls how quickly accelerometer bias is allowed to change over time.
                 # Higher  -> bias adapts faster: reduces long-term translation drift,
@@ -44,7 +44,7 @@
                 # Lower   -> bias adapts slowly: smoother estimates, but risk of steady-state
                 #            translational error accumulating between corrections.
 
-            b_gyr_cov: 0.00000000001
+            b_gyr_cov: 0.01
                 # Gyroscope bias process noise (bias random-walk).
                 # Controls how quickly gyro bias is allowed to change.
                 # Higher  -> bias adapts faster: reduces attitude/yaw drift,
@@ -55,32 +55,34 @@
             det_range: 15.0     # max range of lidar points considered; raise to keep farther points, lower to ignore distant returns
             extrinsic_est_en:  true          
 
-            extrinsic_T: [ 0.2, 0.0, 0.2 ]
+            extrinsic_T: [ 0.0, 0.0, 0.0]
             extrinsic_R: [ 1., 0., 0.,
                         0., 1., 0.,
                         0., 0., 1.]
 
             process_noise:
-                nv:  0.00000000001   # linear acceleration process noise
-                nw:  0.00000000001   # angular acceleration process noise
-                nbg:  0.00000000001  # gyro bias random-walk
-                nba:  0.00000000001  # accel bias random-walk
-                nb_dvl:  0.0001 # DVL bias random-walk
+                nv:  1.0   # linear acceleration process noise
+                nw:  1.0   # angular acceleration process noise
+                nbg:  00.000001  # gyro bias random-walk
+                nba: 0.000001  # accel bias random-walk
+                nb_dvl:  0.000001 # DVL bias random-walk
 
         dynamics:
-            enable: true
+            enable: false
             config_name: "BlueROV"  # maps to auv_core_helper/param/dynamic_model/<config_name>.conf
-            forces_topic: "/IsaacSim/forces_actual"
+            forces_topic: "/IsaacSim/forces_actuasssl"
             model_trust: 1.0 # 1.0 = fully trust dynamics, 0.0 = ignore dynamics
+            thruster_meas_en: true    # use dynamics-based pseudo-accel as a measurement update
+            thruster_acc_cov: 0.1     # covariance for thruster-accel pseudo-measurement (m/s^2)^2
 
         dvl:
-            enable: false
+            enable: true
             topic: "/IsaacSim/dvl"
             extrinsic_T: [ 0.0, 0.0, 0.0 ]
             extrinsic_R: [ 1., 0., 0.,
                         0., 1., 0.,
                         0., 0., 1.]
-            covariance_floor_std: 0.02
+            covariance_floor_std: 0.0000001
             min_speed: 0.0
 
         frames:
