@@ -7,12 +7,14 @@
         filter_size_map: 0.5          # higher = coarser map voxels (lighter, less detail); lower = denser map (heavier)
         cube_side_length: 50.0        # higher keeps larger local map (more memory/CPU, more context); lower trims map (lighter)
         runtime_pos_log_enable: false # true writes pose log to disk; false disables logging
+        debug_metrics_enable: true    # enables concise per-N-frame debug metrics for tuning
+        debug_metrics_interval: 10    # emit debug metrics every N frames
         # map_file_path: "/home/attia/bags/dvl/rosbag2_2025_12_18-16_05_57/map.pcd"    # map save/load path; change to redirect outputs
 
         common:
-            lid_topic:  "/IsaacSim/ThreeDSonarLowFrequency"
-            imu_topic:  "/IsaacSim/imu"
-            time_sync_en: false         # ONLY turn on when external time synchronization is really not possible
+            lid_topic:  "/IsaacSim/ThreeDSonar_LowFrequency"
+            imu_topic:  "/auv/imu"
+            time_sync_en: true         # ONLY turn on when external time synchronization is really not possible
             time_offset_lidar_to_imu: 0.0 # Time offset between lidar and IMU calibrated by other algorithms, e.g. LI-Init (can be found in README).
                                         # This param will take effect no matter what time_sync_en is. So if the time offset is not known exactly, please set as 0.0
 
@@ -24,19 +26,19 @@
 
 
         mapping:
-            acc_cov: 0.01
+            acc_cov: 0.00000000001
                 # Accelerometer measurement noise covariance.
                 # Controls how strongly linear acceleration is trusted in state propagation.
                 # Higher  -> trust accel less: smoother velocity/position, but increased translational lag.
                 # Lower   -> trust accel more: faster response to motion, but more noise and vibration in translation.
 
-            gyr_cov: 0.01
+            gyr_cov: 0.00000000001
                 # Gyroscope measurement noise covariance.
                 # Controls how strongly angular rate measurements are trusted.
                 # Higher  -> trust gyro less: smoother attitude, but attitude (and thus translation) may lag.
                 # Lower   -> trust gyro more: faster attitude response, but increased orientation jitter.
 
-            b_acc_cov: 0.01
+            b_acc_cov: 0.00000000001
                 # Accelerometer bias process noise (bias random-walk).
                 # Controls how quickly accelerometer bias is allowed to change over time.
                 # Higher  -> bias adapts faster: reduces long-term translation drift,
@@ -44,7 +46,7 @@
                 # Lower   -> bias adapts slowly: smoother estimates, but risk of steady-state
                 #            translational error accumulating between corrections.
 
-            b_gyr_cov: 0.01
+            b_gyr_cov: 0.00000000001
                 # Gyroscope bias process noise (bias random-walk).
                 # Controls how quickly gyro bias is allowed to change.
                 # Higher  -> bias adapts faster: reduces attitude/yaw drift,
@@ -53,31 +55,31 @@
 
             fov_degree: 90.0    # lidar horizontal FOV used for map segmentation
             det_range: 15.0     # max range of lidar points considered; raise to keep farther points, lower to ignore distant returns
-            extrinsic_est_en:  true          
+            extrinsic_est_en:  true    # enable extrinsic estimation (true) or use fixed extrinsic (false)          
 
-            extrinsic_T: [ 0.0, 0.0, 0.0]
+            extrinsic_T: [ 0.2, 0.0, 0.2 ]
             extrinsic_R: [ 1., 0., 0.,
                         0., 1., 0.,
                         0., 0., 1.]
 
             process_noise:
-                nv:  1.0   # linear acceleration process noise
-                nw:  1.0   # angular acceleration process noise
-                nbg:  00.000001  # gyro bias random-walk
-                nba: 0.000001  # accel bias random-walk
-                nb_dvl:  0.000001 # DVL bias random-walk
+                nv:  0.00000000001   # linear acceleration process noise
+                nw:  0.00000000001  # angular acceleration process noise
+                nbg:  0.00000000001 # gyro bias random-walk (lower to restrain bias wander)
+                nba: 0.00000000001  # accel bias random-walk (lower to restrain bias wander)
+                nb_dvl:  0.0001 # DVL bias random-walk
 
         dynamics:
             enable: false
             config_name: "BlueROV"  # maps to auv_core_helper/param/dynamic_model/<config_name>.conf
-            forces_topic: "/IsaacSim/forces_actuasssl"
+            forces_topic: "/auv/forces_desired"
             model_trust: 1.0 # 1.0 = fully trust dynamics, 0.0 = ignore dynamics
             thruster_meas_en: true    # use dynamics-based pseudo-accel as a measurement update
-            thruster_acc_cov: 0.1     # covariance for thruster-accel pseudo-measurement (m/s^2)^2
+            thruster_acc_cov: 1.0     # covariance for thruster-accel pseudo-measurement (m/s^2)^2
 
         dvl:
             enable: true
-            topic: "/IsaacSim/dvl"
+            topic: "/auv/dvl"
             extrinsic_T: [ 0.0, 0.0, 0.0 ]
             extrinsic_R: [ 1., 0., 0.,
                         0., 1., 0.,

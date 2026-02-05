@@ -90,6 +90,8 @@ double T1[MAXN], s_plot[MAXN], s_plot2[MAXN], s_plot3[MAXN], s_plot4[MAXN], s_pl
 double match_time = 0, solve_time = 0, solve_const_H_time = 0;
 int    kdtree_size_st = 0, kdtree_size_end = 0, add_point_size = 0, kdtree_delete_counter = 0;
 bool   runtime_pos_log = false, pcd_save_en = false, time_sync_en = false, extrinsic_est_en = true, path_en = true;
+bool   debug_metrics_en = false;
+int    debug_metrics_interval = 30;
 /**************************/
 
 float res_last[100000] = {0.0};
@@ -949,6 +951,8 @@ public:
         this->declare_parameter<double>("dynamics.model_trust", 1.0);
         this->declare_parameter<bool>("dynamics.thruster_meas_en", false);
         this->declare_parameter<double>("dynamics.thruster_acc_cov", 0.1);
+        this->declare_parameter<bool>("debug_metrics_enable", false);
+        this->declare_parameter<int>("debug_metrics_interval", 30);
     this->declare_parameter<string>("frames.map_frame", map_frame_id);
     this->declare_parameter<string>("frames.odom_frame", odom_frame_id);
     this->declare_parameter<string>("frames.body_frame", body_frame_id);
@@ -1013,6 +1017,8 @@ public:
         this->get_parameter_or<string>("frames.map_frame", map_frame_id, map_frame_id);
         this->get_parameter_or<string>("frames.odom_frame", odom_frame_id, odom_frame_id);
         this->get_parameter_or<string>("frames.body_frame", body_frame_id, body_frame_id);
+        this->get_parameter_or<bool>("debug_metrics_enable", debug_metrics_en, false);
+        this->get_parameter_or<int>("debug_metrics_interval", debug_metrics_interval, 30);
 
         RCLCPP_INFO(this->get_logger(), "p_pre->lidar_type %d", p_pre->lidar_type);
 
@@ -1352,6 +1358,40 @@ private:
             if (scan_pub_en && scan_body_pub_en) publish_frame_body(pubLaserCloudFull_body_);
             if (effect_pub_en) publish_effect_world(pubLaserCloudEffect_);
             // if (map_pub_en) publish_map(pubLaserCloudMap_);
+
+            // Optional structured debug metrics to help tune parameters
+            if (debug_metrics_en && debug_metrics_interval > 0 && (frame_num % debug_metrics_interval) == 0)
+            {
+                static bool have_prev = false;
+                static V3D prev_pos = Zero3d;
+                static V3D prev_euler = Zero3d;
+
+                double gravity_norm = state_point.grav.norm();
+                double bg_norm = state_point.bg.norm();
+                double ba_norm = state_point.ba.norm();
+                double vel_norm = state_point.vel.norm();
+                V3D delta_p = have_prev ? (state_point.pos - prev_pos) : Zero3d;
+                V3D delta_euler = have_prev ? (euler_cur - prev_euler) : Zero3d;
+
+                RCLCPP_INFO(this->get_logger(),
+                            "[dbg] raw:%zu down:%d eff:%d map_pts:%d res_mean:%.4f dpos:[%.3f %.3f %.3f] deul:[%.3f %.3f %.3f] vel:%.3f bg:%.4f ba:%.4f | grav:%.4f extrin_T:[%.3f %.3f %.3f]",
+                            feats_undistort->points.size(),
+                            feats_down_size,
+                            effct_feat_num,
+                            ikdtree.validnum(),
+                            res_mean_last,
+                            delta_p(0), delta_p(1), delta_p(2),
+                            delta_euler(0), delta_euler(1), delta_euler(2),
+                            vel_norm,
+                            bg_norm,
+                            ba_norm,
+                            gravity_norm,
+                            state_point.offset_T_L_I(0), state_point.offset_T_L_I(1), state_point.offset_T_L_I(2));
+
+                prev_pos = state_point.pos;
+                prev_euler = euler_cur;
+                have_prev = true;
+            }
 
             /*** Debug variables ***/
             if (runtime_pos_log)

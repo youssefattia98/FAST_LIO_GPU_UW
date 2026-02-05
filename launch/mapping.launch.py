@@ -48,7 +48,14 @@ def generate_launch_description():
         executable='fastlio_mapping',
         parameters=[PathJoinSubstitution([config_path, config_file]),
                     {'use_sim_time': use_sim_time}],
-        output='screen'
+        output='screen',
+        # Raise log level for main nodes; adjust as needed (debug/info/warn/error)
+        arguments=[
+            '--ros-args',
+            '--log-level', 'laser_mapping:=debug',
+            '--log-level', 'fast_lio.preprocess:=debug',
+            '--log-level', 'fast_lio.gpu:=debug'
+        ]
     )
     rviz_node = Node(
         package='rviz2',
@@ -56,17 +63,17 @@ def generate_launch_description():
         arguments=['-d', rviz_cfg],
         condition=IfCondition(rviz_use)
     )
-    fastlio_path_node = Node(
-        package='fast_lio',
-        executable='fastlio_path_publisher.py',
-        name='fastlio_path_node',
-        parameters=[
-            PathJoinSubstitution([config_path, config_file]),
-            {'odom_topic': '/Odometry'},
-            {'use_sim_time': use_sim_time}
-        ],
-        output='screen'
-    )
+    # fastlio_path_node = Node(
+    #     package='fast_lio',
+    #     executable='fastlio_path_publisher.py',
+    #     name='fastlio_path_node',
+    #     parameters=[
+    #         PathJoinSubstitution([config_path, config_file]),
+    #         {'odom_topic': '/Odometry'},
+    #         {'use_sim_time': use_sim_time}
+    #     ],
+    #     output='screen'
+    # )
 
     ld = LaunchDescription()
     ld.add_action(declare_use_sim_time_cmd)
@@ -76,7 +83,7 @@ def generate_launch_description():
     ld.add_action(declare_rviz_config_path_cmd)
 
     ld.add_action(fast_lio_node)
-    ld.add_action(fastlio_path_node)
+    # ld.add_action(fastlio_path_node)
     ld.add_action(rviz_node)
 
     return ld
