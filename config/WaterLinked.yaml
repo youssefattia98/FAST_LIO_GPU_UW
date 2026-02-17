@@ -2,10 +2,10 @@
     ros__parameters:
         feature_extract_enable: false 
         point_filter_num: 4           
-        max_iteration: 10             
-        filter_size_surf: 0.05    
-        filter_size_map: 0.05      
-        cube_side_length: 10.0       
+        max_iteration: 6
+        filter_size_surf: 0.08
+        filter_size_map: 0.10
+        cube_side_length: 3.0
         runtime_pos_log_enable: false # true writes pose log to disk; false disables logging
         debug_metrics_enable: true    # enables concise per-N-frame debug metrics for tuning
         debug_metrics_interval: 10    # emit debug metrics every N frames
@@ -14,36 +14,36 @@
         common:
             lid_topic:  "/sonar_point_cloud"
             imu_topic:  "/auv/imu/data_raw"
-            time_sync_en: true         # ONLY turn on when external time synchronization is really not possible
+            time_sync_en: true        # ONLY turn on when external time synchronization is really not possible
             time_offset_lidar_to_imu: 0.0 # Time offset between lidar and IMU calibrated by other algorithms, e.g. LI-Init (can be found in README).
                                         # This param will take effect no matter what time_sync_en is. So if the time offset is not known exactly, please set as 0.0
 
         preprocess:
             lidar_type: 5                # 1: Livox, 2: Velodyne, 3: Ouster, 4: Mid360, 5: WaterLinked solid-state
             scan_line: 32                # number of scan lines of the LiDAR 
-            blind: 0.2
+            blind: 0.25
             scan_rate: 100         
 
 
         mapping:
-            acc_cov: 0.1
-            gyr_cov: 0.1
+            acc_cov: 0.3
+            gyr_cov: 0.03
             b_acc_cov:  0.0001
             b_gyr_cov:  0.0001
 
             fov_degree: 90.0    # lidar horizontal FOV used for map segmentation
-            det_range: 5.0     # max range of lidar points considered; raise to keep farther points, lower to ignore distant returns
-            extrinsic_est_en:  false    # enable extrinsic estimation (true) or use fixed extrinsic (false)          
+            det_range: 1.0    # max range of lidar points considered; raise to keep farther points, lower to ignore distant returns
+            extrinsic_est_en:  true    # enable extrinsic estimation (true) or use fixed extrinsic (false)          
 
-            extrinsic_T: [ 0.0, 0.0, 0.0 ]
-            extrinsic_R: [ 1., 0., 0.,
-                        0., 1., 0.,
-                        0., 0., 1.0]
+            extrinsic_T: [ 0.1, 0.0, 0.1 ]
+            extrinsic_R: [ 0.965925826, 0.258819045, 0.0,
+                        -0.258819045, 0.965925826, 0.0,
+                        0.0, 0., 1.0]
  
             process_noise:
-                nv:  1e-7   # linear acceleration process noise
-                nw:  1e-7  # angular acceleration process noise
-                nbg:  1e-8 # gyro bias random-walk (lower to restrain bias wander)
+                nv:  1e-4   # linear acceleration process noise
+                nw:  1e-4  # angular acceleration process noise
+                nbg:  1e-7 # gyro bias random-walk (lower to restrain bias wander)
                 nba: 1e-8  # accel bias random-walk (lower to restrain bias wander)
                 nb_dvl:  0.1 # DVL bias random-walk
 
@@ -63,7 +63,7 @@
             extrinsic_R: [ 1., 0., 0.,
                         0., 1., 0.,
                         0., 0., 1.]
-            covariance_floor_std: 0.0000001
+            covariance_floor_std: 0.01
             min_speed: 0.0
 
         frames:
@@ -80,5 +80,5 @@
 
         map_file_path: "/home/attia/bags/no dvl/rosbag2_2025_12_18-16_37_38$"
         pcd_save:
-            pcd_save_en: true
+            pcd_save_en: false
             interval: -1   # one file; use N to split every N scans

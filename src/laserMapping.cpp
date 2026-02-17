@@ -1368,40 +1368,36 @@ private:
             if (effect_pub_en) publish_effect_world(pubLaserCloudEffect_);
             // if (map_pub_en) publish_map(pubLaserCloudMap_);
 
-            // Optional structured debug metrics to help tune parameters
-            if (debug_metrics_en && debug_metrics_interval > 0 && (frame_num % debug_metrics_interval) == 0)
+            // Compact drift trace for stationary tuning runs.
+            static int debug_frame_count = 0;
+            ++debug_frame_count;
+            if (debug_metrics_en && debug_metrics_interval > 0 && (debug_frame_count % debug_metrics_interval) == 0)
             {
                 double imu_ax = 0.0, imu_ay = 0.0, imu_az = 0.0;
-                double imu_gx = 0.0, imu_gy = 0.0, imu_gz = 0.0;
+                double imu_gz = 0.0;
                 double imu_gz_mean = 0.0;
                 int imu_samples = static_cast<int>(Measures.imu.size());
-                double omega_x = state_point.omega[0];
-                double omega_y = state_point.omega[1];
                 double omega_z = state_point.omega[2];
-                double gyro_pred_x = omega_x + state_point.bg(0);
-                double gyro_pred_y = omega_y + state_point.bg(1);
                 double gyro_pred_z = omega_z + state_point.bg(2);
-                auto wrap_deg = [](double x) {
-                    while (x > 180.0) x -= 360.0;
-                    while (x < -180.0) x += 360.0;
-                    return x;
-                };
-
-                V3D eul_pre_imu = SO3ToEuler(state_pre_imu.rot);
-                V3D eul_pre_lidar = SO3ToEuler(state_pre_lidar.rot);
-                V3D eul_post_lidar = SO3ToEuler(state_post_lidar.rot);
 
                 double dpos_imu = (state_pre_lidar.pos - state_pre_imu.pos).norm();
                 double dvel_imu = (state_pre_lidar.vel - state_pre_imu.vel).norm();
-                double dyaw_imu = wrap_deg(eul_pre_lidar(2) - eul_pre_imu(2));
-                double dbgz_imu = state_pre_lidar.bg(2) - state_pre_imu.bg(2);
 
                 double dpos_lidar = (state_post_lidar.pos - state_pre_lidar.pos).norm();
                 double dvel_lidar = (state_post_lidar.vel - state_pre_lidar.vel).norm();
-                double dyaw_lidar = wrap_deg(eul_post_lidar(2) - eul_pre_lidar(2));
-                double dbgz_lidar = state_post_lidar.bg(2) - state_pre_lidar.bg(2);
 
                 double lidar_eff_ratio = (feats_down_size > 0) ? static_cast<double>(effct_feat_num) / static_cast<double>(feats_down_size) : 0.0;
+                double lidar_scan_dt = Measures.lidar_end_time - Measures.lidar_beg_time;
+                double imu_span_dt = 0.0;
+                double last_curvature_ms = 0.0;
+                double ba_norm = std::sqrt(
+                    state_point.ba(0) * state_point.ba(0) +
+                    state_point.ba(1) * state_point.ba(1) +
+                    state_point.ba(2) * state_point.ba(2));
+                if (Measures.lidar && !Measures.lidar->points.empty())
+                {
+                    last_curvature_ms = Measures.lidar->points.back().curvature;
+                }
                 if (!Measures.imu.empty())
                 {
                     double gz_sum = 0.0;
@@ -1414,26 +1410,25 @@ private:
                     imu_ax = imu_msg->linear_acceleration.x;
                     imu_ay = imu_msg->linear_acceleration.y;
                     imu_az = imu_msg->linear_acceleration.z;
-                    imu_gx = imu_msg->angular_velocity.x;
-                    imu_gy = imu_msg->angular_velocity.y;
                     imu_gz = imu_msg->angular_velocity.z;
+                    imu_span_dt = get_time_sec(Measures.imu.back()->header.stamp) - get_time_sec(Measures.imu.front()->header.stamp);
                 }
 
                 RCLCPP_INFO(this->get_logger(),
-                            "[dbg] est_state pos:[%.3f %.3f %.3f] eul:[%.3f %.3f %.3f] vel:[%.3f %.3f %.3f] bg:[%.4f %.4f %.4f] ba:[%.4f %.4f %.4f] | imu_in acc:[%.3f %.3f %.3f] gyr:[%.3f %.3f %.3f] gz_mean:%+.4f n:%d | rot_est omega:[%.4f %.4f %.4f] omega+bg:[%.4f %.4f %.4f] yaw_rate(est/meas):%.4f/%.4f | contrib imu[dpos:%.4f dyaw:%.3f dvel:%.4f dbgz:%+.5f] lidar[dpos:%.4f dyaw:%.3f dvel:%.4f dbgz:%+.5f] match[eff:%d/%d=%.2f res:%.4f]",
+                            "[trace] t:%.3f scan_dt:%.4f tail_curv_ms:%.3f imu[n:%d dt:%.4f] pos:[%.3f %.3f %.3f] vel:[%.3f %.3f %.3f] bgz:%+.4f ba:[%.4f %.4f %.4f|n:%.4f] imu_acc:[%.3f %.3f %.3f] yaw_rate(est/meas/err):%.4f/%.4f/%+.4f gz_mean:%+.4f contrib imu[dpos:%.4f dvel:%.4f] lidar[dpos:%.4f dvel:%.4f] match[eff:%d/%d=%.2f res:%.4f]",
+                            Measures.lidar_beg_time - first_lidar_time,
+                            lidar_scan_dt,
+                            last_curvature_ms,
+                            imu_samples,
+                            imu_span_dt,
                             state_point.pos(0), state_point.pos(1), state_point.pos(2),
-                            euler_cur(0), euler_cur(1), euler_cur(2),
                             state_point.vel(0), state_point.vel(1), state_point.vel(2),
-                            state_point.bg(0), state_point.bg(1), state_point.bg(2),
-                            state_point.ba(0), state_point.ba(1), state_point.ba(2),
+                            state_point.bg(2),
+                            state_point.ba(0), state_point.ba(1), state_point.ba(2), ba_norm,
                             imu_ax, imu_ay, imu_az,
-                            imu_gx, imu_gy, imu_gz,
-                            imu_gz_mean, imu_samples,
-                            omega_x, omega_y, omega_z,
-                            gyro_pred_x, gyro_pred_y, gyro_pred_z,
-                            gyro_pred_z, imu_gz,
-                            dpos_imu, dyaw_imu, dvel_imu, dbgz_imu,
-                            dpos_lidar, dyaw_lidar, dvel_lidar, dbgz_lidar,
+                            gyro_pred_z, imu_gz, gyro_pred_z - imu_gz, imu_gz_mean,
+                            dpos_imu, dvel_imu,
+                            dpos_lidar, dvel_lidar,
                             effct_feat_num, feats_down_size, lidar_eff_ratio, res_mean_last);
             }
 
