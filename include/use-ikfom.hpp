@@ -92,14 +92,10 @@ Eigen::Matrix<double, 30, 1> get_f(state_ikfom &s, const input_ikfom &in)
 	in.gyro.boxminus(omega_meas, s.bg);
 	Eigen::Vector3d omega_body(s.omega[0], s.omega[1], s.omega[2]);
 	Eigen::Vector3d vel_body(s.vel[0], s.vel[1], s.vel[2]);
+	Eigen::Vector3d rot_rate_body = omega_body;
 
 	// Kinematics
 	Eigen::Vector3d pos_dot = s.rot.toRotationMatrix() * vel_body;
-	for (int i = 0; i < 3; ++i)
-	{
-		res(i) = pos_dot(i);
-		res(i + 3) = omega_body(i);
-	}
 
 	// Dynamics (body frame)
 	Eigen::Vector3d vel_dot = Eigen::Vector3d::Zero();
@@ -127,11 +123,18 @@ Eigen::Matrix<double, 30, 1> get_f(state_ikfom &s, const input_ikfom &in)
 
 	if (!dynamics_used)
 	{
+		rot_rate_body = Eigen::Vector3d(omega_meas[0], omega_meas[1], omega_meas[2]);
 		Eigen::Vector3d grav_world(s.grav[0], s.grav[1], s.grav[2]);
 		Eigen::Vector3d grav_body = s.rot.toRotationMatrix().transpose() * grav_world;
 		Eigen::Vector3d specific_force = Eigen::Vector3d(in.acc[0], in.acc[1], in.acc[2]) - Eigen::Vector3d(s.ba[0], s.ba[1], s.ba[2]);
 		vel_dot = specific_force - omega_body.cross(vel_body) + grav_body;
 		omega_dot = Eigen::Vector3d::Zero();
+	}
+
+	for (int i = 0; i < 3; ++i)
+	{
+		res(i) = pos_dot(i);
+		res(i + 3) = rot_rate_body(i);
 	}
 
 	for (int i = 0; i < 3; ++i)

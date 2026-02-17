@@ -47,7 +47,6 @@
 #include <so3_math.h>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp/executors/multi_threaded_executor.hpp>
-#include <ament_index_cpp/get_package_share_directory.hpp>
 #include <libconfig.h++>
 #include <Eigen/Core>
 #include "IMU_Processing.hpp"
@@ -69,7 +68,7 @@
 #include <tf2_ros/static_transform_broadcaster.h>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <geometry_msgs/msg/vector3.hpp>
-#include <geometry_msgs/msg/vector3_stamped.hpp>
+#include <geometry_msgs/msg/twist_with_covariance_stamped.hpp>
 #ifdef FASTLIO_HAS_LIVOX
 #include <livox_ros_driver2/msg/custom_msg.hpp>
 #endif
@@ -137,7 +136,7 @@ deque<double>                     time_buffer;
 deque<PointCloudXYZI::Ptr>        lidar_buffer;
 deque<sensor_msgs::msg::Imu::ConstSharedPtr> imu_buffer;
 deque<sensor_msgs::msg::JointState::ConstSharedPtr> thruster_buffer;
-deque<geometry_msgs::msg::Vector3Stamped::ConstSharedPtr> dvl_buffer;
+deque<geometry_msgs::msg::TwistWithCovarianceStamped::ConstSharedPtr> dvl_buffer;
 
 PointCloudXYZI::Ptr featsFromMap(new PointCloudXYZI());
 PointCloudXYZI::Ptr feats_undistort(new PointCloudXYZI());
@@ -434,10 +433,10 @@ void thruster_cbk(const sensor_msgs::msg::JointState::UniquePtr msg_in)
     sig_buffer.notify_all();
 }
 
-void dvl_cbk(const geometry_msgs::msg::Vector3Stamped::UniquePtr msg_in)
+void dvl_cbk(const geometry_msgs::msg::TwistWithCovarianceStamped::UniquePtr msg_in)
 {
-    auto msg = geometry_msgs::msg::Vector3Stamped::SharedPtr(
-        new geometry_msgs::msg::Vector3Stamped(*msg_in));
+    auto msg = geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr(
+        new geometry_msgs::msg::TwistWithCovarianceStamped(*msg_in));
     double timestamp = get_time_sec(msg->header.stamp);
 
     mtx_buffer.lock();
@@ -947,6 +946,7 @@ public:
         this->declare_parameter<double>("dvl.min_speed", 0.0);
         this->declare_parameter<bool>("dynamics.enable", true);
         this->declare_parameter<string>("dynamics.config_name", "default_value");
+        this->declare_parameter<string>("dynamics.config_path", "");
         this->declare_parameter<string>("dynamics.forces_topic", "/auv/forces_desired_stamped");
         this->declare_parameter<double>("dynamics.model_trust", 1.0);
         this->declare_parameter<bool>("dynamics.thruster_meas_en", false);
@@ -1010,6 +1010,7 @@ public:
         this->get_parameter_or<double>("dvl.min_speed", dvl_min_speed, 0.0);
         this->get_parameter_or<bool>("dynamics.enable", dynamics_enabled_, true);
         this->get_parameter_or<string>("dynamics.config_name", dynamics_config_name_, "default_value");
+        this->get_parameter_or<string>("dynamics.config_path", dynamics_config_path_, "");
         this->get_parameter_or<string>("dynamics.forces_topic", dynamics_forces_topic_, "/auv/forces_desired_stamped");
         this->get_parameter_or<double>("dynamics.model_trust", dynamics_model_trust_, 1.0);
         this->get_parameter_or<bool>("dynamics.thruster_meas_en", thruster_meas_en_, false);
@@ -1088,15 +1089,17 @@ public:
         {
             try
             {
-                std::string package_path = ament_index_cpp::get_package_share_directory("auv_core_helper");
-                std::string config_path = package_path + "/param/dynamic_model/" + dynamics_config_name_ + ".conf";
+                if (dynamics_config_path_.empty())
+                {
+                    throw std::runtime_error("dynamics.config_path is empty");
+                }
 
                 libconfig::Config config;
-                config.readFile(config_path.c_str());
+                config.readFile(dynamics_config_path_.c_str());
 
                 dynamics_model_ = std::make_shared<mvm::UnderwaterVehicleModel>(config, dynamics_config_name_);
                 fastlio::dynamics::set_model(dynamics_model_);
-                RCLCPP_INFO(this->get_logger(), "Dynamics model loaded: %s", config_path.c_str());
+                RCLCPP_INFO(this->get_logger(), "Dynamics model loaded: %s", dynamics_config_path_.c_str());
             }
             catch (const std::exception &ex)
             {
@@ -1140,7 +1143,7 @@ public:
         sub_thrusters_ = this->create_subscription<sensor_msgs::msg::JointState>(dynamics_forces_topic_, 50, thruster_cbk);
         if (dvl_enabled)
         {
-            sub_dvl_ = this->create_subscription<geometry_msgs::msg::Vector3Stamped>(dvl_topic, 50, dvl_cbk);
+            sub_dvl_ = this->create_subscription<geometry_msgs::msg::TwistWithCovarianceStamped>(dvl_topic, 50, dvl_cbk);
         }
         pubLaserCloudFull_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered", 20);
         pubLaserCloudFull_body_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered_body", 20);
@@ -1196,6 +1199,9 @@ private:
             }
 
             double t0,t1,t2,t3,t4,t5,match_start, solve_start, svd_time;
+            state_ikfom state_pre_imu = kf.get_x();
+            state_ikfom state_pre_lidar = state_pre_imu;
+            state_ikfom state_post_lidar = state_pre_imu;
 
             match_time = 0;
             kdtree_search_time = 0.0;
@@ -1210,7 +1216,7 @@ private:
             {
                 for (const auto &dvl_msg : Measures.dvl)
                 {
-                    const auto &lin = dvl_msg->vector;
+                    const auto &lin = dvl_msg->twist.twist.linear;
                     if (!std::isfinite(lin.x) || !std::isfinite(lin.y) || !std::isfinite(lin.z))
                     {
                         continue;
@@ -1238,6 +1244,8 @@ private:
                     kf.update_iterated_dyn_runtime_share(z_dvl, h_dvl_share);
                 }
             }
+
+            state_pre_lidar = kf.get_x();
 
             state_point = kf.get_x();
             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
@@ -1335,6 +1343,7 @@ private:
             double solve_H_time = 0;
             kf.update_iterated_dyn_share_modified(LASER_POINT_COV, solve_H_time);
             state_point = kf.get_x();
+            state_post_lidar = state_point;
             euler_cur = SO3ToEuler(state_point.rot);
             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
             geoQuat.x = state_point.rot.coeffs()[0];
@@ -1362,35 +1371,70 @@ private:
             // Optional structured debug metrics to help tune parameters
             if (debug_metrics_en && debug_metrics_interval > 0 && (frame_num % debug_metrics_interval) == 0)
             {
-                static bool have_prev = false;
-                static V3D prev_pos = Zero3d;
-                static V3D prev_euler = Zero3d;
+                double imu_ax = 0.0, imu_ay = 0.0, imu_az = 0.0;
+                double imu_gx = 0.0, imu_gy = 0.0, imu_gz = 0.0;
+                double imu_gz_mean = 0.0;
+                int imu_samples = static_cast<int>(Measures.imu.size());
+                double omega_x = state_point.omega[0];
+                double omega_y = state_point.omega[1];
+                double omega_z = state_point.omega[2];
+                double gyro_pred_x = omega_x + state_point.bg(0);
+                double gyro_pred_y = omega_y + state_point.bg(1);
+                double gyro_pred_z = omega_z + state_point.bg(2);
+                auto wrap_deg = [](double x) {
+                    while (x > 180.0) x -= 360.0;
+                    while (x < -180.0) x += 360.0;
+                    return x;
+                };
 
-                double gravity_norm = state_point.grav.norm();
-                double bg_norm = state_point.bg.norm();
-                double ba_norm = state_point.ba.norm();
-                double vel_norm = state_point.vel.norm();
-                V3D delta_p = have_prev ? (state_point.pos - prev_pos) : Zero3d;
-                V3D delta_euler = have_prev ? (euler_cur - prev_euler) : Zero3d;
+                V3D eul_pre_imu = SO3ToEuler(state_pre_imu.rot);
+                V3D eul_pre_lidar = SO3ToEuler(state_pre_lidar.rot);
+                V3D eul_post_lidar = SO3ToEuler(state_post_lidar.rot);
+
+                double dpos_imu = (state_pre_lidar.pos - state_pre_imu.pos).norm();
+                double dvel_imu = (state_pre_lidar.vel - state_pre_imu.vel).norm();
+                double dyaw_imu = wrap_deg(eul_pre_lidar(2) - eul_pre_imu(2));
+                double dbgz_imu = state_pre_lidar.bg(2) - state_pre_imu.bg(2);
+
+                double dpos_lidar = (state_post_lidar.pos - state_pre_lidar.pos).norm();
+                double dvel_lidar = (state_post_lidar.vel - state_pre_lidar.vel).norm();
+                double dyaw_lidar = wrap_deg(eul_post_lidar(2) - eul_pre_lidar(2));
+                double dbgz_lidar = state_post_lidar.bg(2) - state_pre_lidar.bg(2);
+
+                double lidar_eff_ratio = (feats_down_size > 0) ? static_cast<double>(effct_feat_num) / static_cast<double>(feats_down_size) : 0.0;
+                if (!Measures.imu.empty())
+                {
+                    double gz_sum = 0.0;
+                    for (const auto &imu_msg : Measures.imu)
+                    {
+                        gz_sum += imu_msg->angular_velocity.z;
+                    }
+                    imu_gz_mean = gz_sum / static_cast<double>(Measures.imu.size());
+                    const auto &imu_msg = Measures.imu.back();
+                    imu_ax = imu_msg->linear_acceleration.x;
+                    imu_ay = imu_msg->linear_acceleration.y;
+                    imu_az = imu_msg->linear_acceleration.z;
+                    imu_gx = imu_msg->angular_velocity.x;
+                    imu_gy = imu_msg->angular_velocity.y;
+                    imu_gz = imu_msg->angular_velocity.z;
+                }
 
                 RCLCPP_INFO(this->get_logger(),
-                            "[dbg] raw:%zu down:%d eff:%d map_pts:%d res_mean:%.4f dpos:[%.3f %.3f %.3f] deul:[%.3f %.3f %.3f] vel:%.3f bg:%.4f ba:%.4f | grav:%.4f extrin_T:[%.3f %.3f %.3f]",
-                            feats_undistort->points.size(),
-                            feats_down_size,
-                            effct_feat_num,
-                            ikdtree.validnum(),
-                            res_mean_last,
-                            delta_p(0), delta_p(1), delta_p(2),
-                            delta_euler(0), delta_euler(1), delta_euler(2),
-                            vel_norm,
-                            bg_norm,
-                            ba_norm,
-                            gravity_norm,
-                            state_point.offset_T_L_I(0), state_point.offset_T_L_I(1), state_point.offset_T_L_I(2));
-
-                prev_pos = state_point.pos;
-                prev_euler = euler_cur;
-                have_prev = true;
+                            "[dbg] est_state pos:[%.3f %.3f %.3f] eul:[%.3f %.3f %.3f] vel:[%.3f %.3f %.3f] bg:[%.4f %.4f %.4f] ba:[%.4f %.4f %.4f] | imu_in acc:[%.3f %.3f %.3f] gyr:[%.3f %.3f %.3f] gz_mean:%+.4f n:%d | rot_est omega:[%.4f %.4f %.4f] omega+bg:[%.4f %.4f %.4f] yaw_rate(est/meas):%.4f/%.4f | contrib imu[dpos:%.4f dyaw:%.3f dvel:%.4f dbgz:%+.5f] lidar[dpos:%.4f dyaw:%.3f dvel:%.4f dbgz:%+.5f] match[eff:%d/%d=%.2f res:%.4f]",
+                            state_point.pos(0), state_point.pos(1), state_point.pos(2),
+                            euler_cur(0), euler_cur(1), euler_cur(2),
+                            state_point.vel(0), state_point.vel(1), state_point.vel(2),
+                            state_point.bg(0), state_point.bg(1), state_point.bg(2),
+                            state_point.ba(0), state_point.ba(1), state_point.ba(2),
+                            imu_ax, imu_ay, imu_az,
+                            imu_gx, imu_gy, imu_gz,
+                            imu_gz_mean, imu_samples,
+                            omega_x, omega_y, omega_z,
+                            gyro_pred_x, gyro_pred_y, gyro_pred_z,
+                            gyro_pred_z, imu_gz,
+                            dpos_imu, dyaw_imu, dvel_imu, dbgz_imu,
+                            dpos_lidar, dyaw_lidar, dvel_lidar, dbgz_lidar,
+                            effct_feat_num, feats_down_size, lidar_eff_ratio, res_mean_last);
             }
 
             /*** Debug variables ***/
@@ -1455,7 +1499,7 @@ private:
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu_;
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr sub_thrusters_;
-    rclcpp::Subscription<geometry_msgs::msg::Vector3Stamped>::SharedPtr sub_dvl_;
+    rclcpp::Subscription<geometry_msgs::msg::TwistWithCovarianceStamped>::SharedPtr sub_dvl_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_pcl_pc_;
 #ifdef FASTLIO_HAS_LIVOX
     rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr sub_pcl_livox_;
@@ -1469,6 +1513,7 @@ private:
 
     bool dynamics_enabled_ = false;
     std::string dynamics_config_name_;
+    std::string dynamics_config_path_;
     std::string dynamics_forces_topic_;
     double dynamics_model_trust_ = 1.0;
     bool thruster_meas_en_ = false;

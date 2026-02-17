@@ -244,7 +244,7 @@ void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 
   init_P(9,9) = init_P(10,10) = init_P(11,11) = 0.00001;
   init_P(15,15) = init_P(16,16) = init_P(17,17) = 0.0001;
   init_P(18,18) = init_P(19,19) = init_P(20,20) = 0.001;
-  init_P(21,21) = init_P(22,22) = 0.00001; 
+  init_P(21,21) = init_P(22,22) = init_P(23,23) = 0.00001;
   init_P(27,27) = init_P(28,28) = init_P(29,29) = 0.001;
   kf_state.change_P(init_P);
   last_imu_ = meas.imu.back();
@@ -380,18 +380,15 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
     Q.block<3, 3>(12, 12).diagonal() = cov_proc_nb_dvl;
     kf_state.predict(dt, Q, in);
 
-    if (fastlio::dynamics::has_model())
-    {
-      double lambda_dyn = std::max(0.01, dynamics_model_trust_);
-      set_imu_accel_noise_diag(Eigen::Vector3d(cov_acc(0), cov_acc(1), cov_acc(2)) * lambda_dyn);
-      set_imu_gyro_noise_diag(Eigen::Vector3d(cov_gyr(0), cov_gyr(1), cov_gyr(2)));
-      double z_arr[3] = {acc_avr(0), acc_avr(1), acc_avr(2)};
-      vect3 z_acc(z_arr, 3);
-      kf_state.update_iterated_dyn_runtime_share(z_acc, h_imu_accel_share);
-      double z_gyr_arr[3] = {angvel_avr(0), angvel_avr(1), angvel_avr(2)};
-      vect3 z_gyr(z_gyr_arr, 3);
-      kf_state.update_iterated_dyn_runtime_share(z_gyr, h_imu_gyro_share);
-    }
+    double lambda_dyn = fastlio::dynamics::has_model() ? std::max(0.01, dynamics_model_trust_) : 1.0;
+    set_imu_accel_noise_diag(Eigen::Vector3d(cov_acc(0), cov_acc(1), cov_acc(2)) * lambda_dyn);
+    set_imu_gyro_noise_diag(Eigen::Vector3d(cov_gyr(0), cov_gyr(1), cov_gyr(2)));
+    double z_arr[3] = {acc_avr(0), acc_avr(1), acc_avr(2)};
+    vect3 z_acc(z_arr, 3);
+    kf_state.update_iterated_dyn_runtime_share(z_acc, h_imu_accel_share);
+    double z_gyr_arr[3] = {angvel_avr(0), angvel_avr(1), angvel_avr(2)};
+    vect3 z_gyr(z_gyr_arr, 3);
+    kf_state.update_iterated_dyn_runtime_share(z_gyr, h_imu_gyro_share);
     if (thruster_meas_en_ && dyn_acc_valid)
     {
       double z_thr_arr[3] = {specific_force_dyn(0), specific_force_dyn(1), specific_force_dyn(2)};

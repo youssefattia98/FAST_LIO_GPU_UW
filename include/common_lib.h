@@ -9,7 +9,7 @@
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <nav_msgs/msg/odometry.hpp>
-#include <geometry_msgs/msg/vector3_stamped.hpp>
+#include <geometry_msgs/msg/twist_with_covariance_stamped.hpp>
 
 using namespace std;
 using namespace Eigen;
@@ -17,7 +17,7 @@ using namespace Eigen;
 #define USE_IKFOM
 
 #define PI_M (3.14159265358)
-#define G_m_s2 (9.8100004196167)         // Gravaty const in GuangDong/China
+#define G_m_s2 (9.80550)         // Gravaty const in GuangDong/China
 #define DIM_STATE (18)        // Dimension of states (Let Dim(SO(3)) = 3)
 #define DIM_PROC_N (12)       // Dimension of process noise (Let Dim(SO(3)) = 3)
 #define CUBE_LEN  (6.0)
@@ -64,7 +64,7 @@ struct MeasureGroup     // Lidar data and imu dates for the curent process
     PointCloudXYZI::Ptr lidar;
     deque<sensor_msgs::msg::Imu::ConstSharedPtr> imu;
     deque<sensor_msgs::msg::JointState::ConstSharedPtr> thruster_forces;
-    deque<geometry_msgs::msg::Vector3Stamped::ConstSharedPtr> dvl;
+    deque<geometry_msgs::msg::TwistWithCovarianceStamped::ConstSharedPtr> dvl;
 };
 
 struct StatesGroup

@@ -26,7 +26,7 @@ if(FASTLIO_USE_CUDA)
   endif()
   enable_language(CUDA)
   find_package(CUDAToolkit REQUIRED)
-  set(CMAKE_CUDA_STANDARD 14)
+  set(CMAKE_CUDA_STANDARD 17)
   set(CMAKE_CUDA_STANDARD_REQUIRED ON)
   add_definitions(-DFASTLIO_USE_CUDA)
 endif()
@@ -136,6 +136,11 @@ if(FASTLIO_USE_CUDA)
 endif()
 
 add_executable(fastlio_mapping ${FASTLIO_SOURCES})
+set_target_properties(fastlio_mapping PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED ON
+  CUDA_STANDARD 17
+  CUDA_STANDARD_REQUIRED ON)
 target_include_directories(fastlio_mapping PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>

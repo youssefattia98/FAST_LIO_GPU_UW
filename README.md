@@ -100,11 +100,11 @@ Clone the repository and colcon build:
 1. Install the NVIDIA CUDA toolkit (JetPack already ships with it on Jetson; on desktop Ubuntu you can `sudo apt install nvidia-cuda-toolkit` or install from NVIDIA drivers).
 2. Ensure `nvcc` is on your `PATH` or export it explicitly:
     ```bash
-    export CUDACXX=/usr/local/cuda/bin/nvcc
+    export CUDACXX=/usr/local/cuda-12.6/bin/nvcc
     ```
 3. Build the package with CUDA kernels enabled:
     ```bash
-    colcon build --packages-select fast_lio --cmake-args -DFASTLIO_USE_CUDA=OFF -DCMAKE_BUILD_TYPE=Release -DFASTLIO_REQUIRE_LIVOX=OFF
+    colcon build --packages-select fast_lio --cmake-args -DFASTLIO_USE_CUDA=ON -DCMAKE_BUILD_TYPE=Release -DFASTLIO_REQUIRE_LIVOX=OFF --symlink-install
     ```
 
 If the CUDA toolkit is not available the build will stop with `No CMAKE_CUDA_COMPILER could be found`. Rebuild with `FASTLIO_USE_CUDA=OFF` (default) or install the toolkit before retrying.
