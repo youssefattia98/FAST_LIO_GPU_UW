@@ -46,6 +46,7 @@
                 nbg:  0.0001 # gyro bias random-walk (lower to restrain bias wander)
                 nba: 0.0001  # accel bias random-walk (lower to restrain bias wander)
                 nb_dvl:  0.0001 # DVL bias random-walk
+                nb_pressure: 0.0001 # pressure-depth bias random-walk (m^2/s)
 
         dynamics:
             enable: false
@@ -65,6 +66,13 @@
                         0., 0., 1.]
             covariance_floor_std: 0.0001
             min_speed: 0.0
+
+        pressure:
+            enable: true
+            topic: "/auv/pressure/scaled2"
+            extrinsic_T: [ 0.0, 0.0, 0.0 ] # pressure sensor position wrt IMU frame [m]
+            covariance_floor_std: 4.09 # [m], conservative from +/-400 mbar worst-case spec in fresh water
+            reference_pressure_pa: 101325.0
 
         frames:
             map_frame: "World"

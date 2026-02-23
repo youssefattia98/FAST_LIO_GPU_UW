@@ -2,6 +2,7 @@
 #define USE_IKFOM_H
 
 #include <IKFoM_toolkit/esekfom/esekfom.hpp>
+#include <algorithm>
 #include <cmath>
 #include "dynamics_bridge.hpp"
 
@@ -18,6 +19,8 @@ inline Eigen::Vector3d g_thruster_accel_noise_diag = Eigen::Vector3d(0.1, 0.1, 0
 inline Eigen::Matrix3d g_dvl_meas_cov = Eigen::Matrix3d::Identity();
 inline Eigen::Matrix3d g_dvl_R_b_d = Eigen::Matrix3d::Identity();
 inline Eigen::Vector3d g_dvl_r_bd_b = Eigen::Vector3d::Zero();
+inline double g_pressure_meas_var = 1.0;
+inline Eigen::Vector3d g_pressure_r_bp_b = Eigen::Vector3d::Zero();
 
 inline void set_imu_accel_noise_diag(const Eigen::Vector3d &diag)
 {
@@ -45,6 +48,16 @@ inline void set_dvl_mount(const Eigen::Vector3d &r_bd_b, const Eigen::Matrix3d &
 	g_dvl_R_b_d = R_b_d;
 }
 
+inline void set_pressure_cov(const double var)
+{
+	g_pressure_meas_var = std::max(var, 1e-9);
+}
+
+inline void set_pressure_mount(const Eigen::Vector3d &r_bp_b)
+{
+	g_pressure_r_bp_b = r_bp_b;
+}
+
 MTK_BUILD_MANIFOLD(state_ikfom,
 ((vect3, pos))
 ((SO3, rot))
@@ -56,6 +69,7 @@ MTK_BUILD_MANIFOLD(state_ikfom,
 ((vect3, ba))
 ((vect3, grav))
 ((vect3, b_dvl))
+((vect1, b_pressure))
 );
 
 MTK_BUILD_MANIFOLD(input_ikfom,
@@ -69,7 +83,11 @@ MTK_BUILD_MANIFOLD(process_noise_ikfom,
 ((vect3, nbg))
 ((vect3, nba))
 ((vect3, nb_dvl))
+((vect1, nb_pressure))
 );
+
+constexpr int kStateDof = state_ikfom::DOF;
+constexpr int kProcessNoiseDof = process_noise_ikfom::DOF;
 
 MTK::get_cov<process_noise_ikfom>::type process_noise_cov()
 {
@@ -79,14 +97,15 @@ MTK::get_cov<process_noise_ikfom>::type process_noise_cov()
 	MTK::setDiagonal<process_noise_ikfom, vect3, 6>(cov, &process_noise_ikfom::nbg, 0.00001); // *dt 0.00001 0.00001 * dt *dt 0.3 //0.001 0.0001 0.01
 	MTK::setDiagonal<process_noise_ikfom, vect3, 9>(cov, &process_noise_ikfom::nba, 0.00001);   //0.001 0.05 0.0001/out 0.01
 	MTK::setDiagonal<process_noise_ikfom, vect3, 12>(cov, &process_noise_ikfom::nb_dvl, 0.00001);
+	MTK::setDiagonal<process_noise_ikfom, vect1, 15>(cov, &process_noise_ikfom::nb_pressure, 0.00001);
 	return cov;
 }
 
 //double L_offset_to_I[3] = {0.04165, 0.02326, -0.0284}; // Avia 
 //vect3 Lidar_offset_to_IMU(L_offset_to_I, 3);
-Eigen::Matrix<double, 30, 1> get_f(state_ikfom &s, const input_ikfom &in)
+Eigen::Matrix<double, kStateDof, 1> get_f(state_ikfom &s, const input_ikfom &in)
 {
-	Eigen::Matrix<double, 30, 1> res = Eigen::Matrix<double, 30, 1>::Zero();
+	Eigen::Matrix<double, kStateDof, 1> res = Eigen::Matrix<double, kStateDof, 1>::Zero();
 
 	vect3 omega_meas;
 	in.gyro.boxminus(omega_meas, s.bg);
@@ -145,9 +164,9 @@ Eigen::Matrix<double, 30, 1> get_f(state_ikfom &s, const input_ikfom &in)
 	return res;
 }
 
-Eigen::Matrix<double, 30, 30> df_dx(state_ikfom &s, const input_ikfom &in)
+Eigen::Matrix<double, kStateDof, kStateDof> df_dx(state_ikfom &s, const input_ikfom &in)
 {
-	Eigen::Matrix<double, 30, 30> cov = Eigen::Matrix<double, 30, 30>::Zero();
+	Eigen::Matrix<double, kStateDof, kStateDof> cov = Eigen::Matrix<double, kStateDof, kStateDof>::Zero();
 
 	// pos_dot = R * v_body
 	Eigen::Vector3d vel_body_eig(s.vel[0], s.vel[1], s.vel[2]);
@@ -167,9 +186,9 @@ Eigen::Matrix<double, 30, 30> df_dx(state_ikfom &s, const input_ikfom &in)
 }
 
 
-Eigen::Matrix<double, 30, 15> df_dw(state_ikfom &s, const input_ikfom &in)
+Eigen::Matrix<double, kStateDof, kProcessNoiseDof> df_dw(state_ikfom &s, const input_ikfom &in)
 {
-	Eigen::Matrix<double, 30, 15> cov = Eigen::Matrix<double, 30, 15>::Zero();
+	Eigen::Matrix<double, kStateDof, kProcessNoiseDof> cov = Eigen::Matrix<double, kStateDof, kProcessNoiseDof>::Zero();
 	// velocity and omega process noise
 	cov.template block<3, 3>(12, 0) = Eigen::Matrix3d::Identity();
 	cov.template block<3, 3>(15, 3) = Eigen::Matrix3d::Identity();
@@ -178,6 +197,8 @@ Eigen::Matrix<double, 30, 15> df_dw(state_ikfom &s, const input_ikfom &in)
 	cov.template block<3, 3>(21, 9) = Eigen::Matrix3d::Identity();
 	// dvl bias random walk
 	cov.template block<3, 3>(27, 12) = Eigen::Matrix3d::Identity();
+	// pressure bias random walk
+	cov(30, 15) = 1.0;
 	return cov;
 }
 
@@ -219,7 +240,7 @@ vect3 SO3ToEuler(const SO3 &orient)
 
 inline vect3 h_imu_accel_share(state_ikfom &s, esekfom::dyn_runtime_share_datastruct<double> &dyn_share)
 {
-	dyn_share.h_x = Eigen::Matrix<double, 3, 30>::Zero();
+	dyn_share.h_x = Eigen::Matrix<double, 3, kStateDof>::Zero();
 	dyn_share.h_v = Eigen::Matrix<double, 3, 3>::Identity();
 	dyn_share.R = g_imu_accel_noise_diag.asDiagonal();
 
@@ -261,7 +282,7 @@ inline vect3 h_imu_accel_share(state_ikfom &s, esekfom::dyn_runtime_share_datast
 
 inline vect3 h_thruster_accel_share(state_ikfom &s, esekfom::dyn_runtime_share_datastruct<double> &dyn_share)
 {
-	dyn_share.h_x = Eigen::Matrix<double, 3, 30>::Zero();
+	dyn_share.h_x = Eigen::Matrix<double, 3, kStateDof>::Zero();
 	dyn_share.h_v = Eigen::Matrix<double, 3, 3>::Identity();
 	dyn_share.R = g_thruster_accel_noise_diag.asDiagonal();
 
@@ -299,7 +320,7 @@ inline vect3 h_thruster_accel_share(state_ikfom &s, esekfom::dyn_runtime_share_d
 
 inline vect3 h_imu_gyro_share(state_ikfom &s, esekfom::dyn_runtime_share_datastruct<double> &dyn_share)
 {
-	dyn_share.h_x = Eigen::Matrix<double, 3, 30>::Zero();
+	dyn_share.h_x = Eigen::Matrix<double, 3, kStateDof>::Zero();
 	dyn_share.h_v = Eigen::Matrix<double, 3, 3>::Identity();
 	dyn_share.R = g_imu_gyro_noise_diag.asDiagonal();
 
@@ -316,7 +337,7 @@ inline vect3 h_imu_gyro_share(state_ikfom &s, esekfom::dyn_runtime_share_datastr
 
 inline vect3 h_dvl_share(state_ikfom &s, esekfom::dyn_runtime_share_datastruct<double> &dyn_share)
 {
-	dyn_share.h_x = Eigen::Matrix<double, 3, 30>::Zero();
+	dyn_share.h_x = Eigen::Matrix<double, 3, kStateDof>::Zero();
 	dyn_share.h_v = Eigen::Matrix<double, 3, 3>::Identity();
 	dyn_share.R = g_dvl_meas_cov;
 
@@ -335,6 +356,34 @@ inline vect3 h_dvl_share(state_ikfom &s, esekfom::dyn_runtime_share_datastruct<d
 
 	double temp[3] = {z_pred(0), z_pred(1), z_pred(2)};
 	vect3 out(temp, 3);
+	return out;
+}
+
+inline double pressure_meas_predict(const state_ikfom &s)
+{
+	const double z_sign = (std::abs(s.grav[2]) < 1e-6) ? -1.0 : ((s.grav[2] >= 0.0) ? 1.0 : -1.0);
+	Eigen::Vector3d p_sensor_world = Eigen::Vector3d(s.pos[0], s.pos[1], s.pos[2]) +
+	                                 s.rot.toRotationMatrix() * g_pressure_r_bp_b;
+	return z_sign * p_sensor_world(2) + s.b_pressure[0];
+}
+
+inline vect1 h_pressure_share(state_ikfom &s, esekfom::dyn_runtime_share_datastruct<double> &dyn_share)
+{
+	dyn_share.h_x = Eigen::Matrix<double, 1, kStateDof>::Zero();
+	dyn_share.h_v = Eigen::Matrix<double, 1, 1>::Identity();
+	dyn_share.R = Eigen::Matrix<double, 1, 1>::Constant(g_pressure_meas_var);
+
+	vect3 r_bp;
+	r_bp << g_pressure_r_bp_b(0), g_pressure_r_bp_b(1), g_pressure_r_bp_b(2);
+	Eigen::Matrix3d d_Rr_dtheta = -s.rot.toRotationMatrix() * MTK::hat(r_bp);
+	const double z_sign = (std::abs(s.grav[2]) < 1e-6) ? -1.0 : ((s.grav[2] >= 0.0) ? 1.0 : -1.0);
+
+	dyn_share.h_x.template block<1, 3>(0, 0) << 0.0, 0.0, z_sign;
+	dyn_share.h_x.template block<1, 3>(0, 3) = z_sign * d_Rr_dtheta.row(2);
+	dyn_share.h_x(0, 30) = 1.0;
+
+	double temp[1] = {pressure_meas_predict(s)};
+	vect1 out(temp, 1);
 	return out;
 }
 

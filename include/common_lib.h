@@ -8,6 +8,7 @@
 #include <fast_lio/msg/pose6_d.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
+#include <sensor_msgs/msg/fluid_pressure.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <geometry_msgs/msg/twist_with_covariance_stamped.hpp>
 
@@ -65,6 +66,7 @@ struct MeasureGroup     // Lidar data and imu dates for the curent process
     deque<sensor_msgs::msg::Imu::ConstSharedPtr> imu;
     deque<sensor_msgs::msg::JointState::ConstSharedPtr> thruster_forces;
     deque<geometry_msgs::msg::TwistWithCovarianceStamped::ConstSharedPtr> dvl;
+    deque<sensor_msgs::msg::FluidPressure::ConstSharedPtr> pressure;
 };
 
 struct StatesGroup

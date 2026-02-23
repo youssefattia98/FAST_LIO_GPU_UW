@@ -49,9 +49,9 @@ class ImuProcess
   void set_acc_bias_cov(const V3D &b_a);
   void set_dynamics_trust(double trust);
   void set_thruster_meas(bool enable, const V3D &cov);
-  void set_process_noise(const V3D &nv, const V3D &nw, const V3D &nbg, const V3D &nba, const V3D &nb_dvl);
-  Eigen::Matrix<double, 15, 15> Q;
-  void Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 15, input_ikfom> &kf_state, PointCloudXYZI::Ptr pcl_un_);
+  void set_process_noise(const V3D &nv, const V3D &nw, const V3D &nbg, const V3D &nba, const V3D &nb_dvl, double nb_pressure);
+  Eigen::Matrix<double, process_noise_ikfom::DOF, process_noise_ikfom::DOF> Q;
+  void Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, process_noise_ikfom::DOF, input_ikfom> &kf_state, PointCloudXYZI::Ptr pcl_un_);
 
   ofstream fout_imu;
   V3D cov_acc;
@@ -65,14 +65,15 @@ class ImuProcess
   V3D cov_proc_nbg;
   V3D cov_proc_nba;
   V3D cov_proc_nb_dvl;
+  double cov_proc_nb_pressure;
   double dynamics_model_trust_ = 1.0;
   bool thruster_meas_en_ = false;
   V3D thruster_acc_cov_ = V3D(0.1, 0.1, 0.1);
   double first_lidar_time;
 
  private:
-  void IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 15, input_ikfom> &kf_state, int &N);
-  void UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 15, input_ikfom> &kf_state, PointCloudXYZI &pcl_in_out);
+  void IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, process_noise_ikfom::DOF, input_ikfom> &kf_state, int &N);
+  void UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikfom, process_noise_ikfom::DOF, input_ikfom> &kf_state, PointCloudXYZI &pcl_in_out);
 
   PointCloudXYZI::Ptr cur_pcl_un_;
   // sensor_msgs::ImuConstPtr last_imu_;
@@ -107,6 +108,7 @@ ImuProcess::ImuProcess()
   cov_proc_nbg  = V3D(0.00001, 0.00001, 0.00001);
   cov_proc_nba  = V3D(0.00001, 0.00001, 0.00001);
   cov_proc_nb_dvl = V3D(0.00001, 0.00001, 0.00001);
+  cov_proc_nb_pressure = 0.00001;
   mean_acc      = V3D(0, 0, -1.0);
   mean_gyr      = V3D(0, 0, 0);
   angvel_last     = Zero3d;
@@ -170,13 +172,14 @@ void ImuProcess::set_acc_bias_cov(const V3D &b_a)
   cov_bias_acc = b_a;
 }
 
-void ImuProcess::set_process_noise(const V3D &nv, const V3D &nw, const V3D &nbg, const V3D &nba, const V3D &nb_dvl)
+void ImuProcess::set_process_noise(const V3D &nv, const V3D &nw, const V3D &nbg, const V3D &nba, const V3D &nb_dvl, double nb_pressure)
 {
   cov_proc_nv = nv;
   cov_proc_nw = nw;
   cov_proc_nbg = nbg;
   cov_proc_nba = nba;
   cov_proc_nb_dvl = nb_dvl;
+  cov_proc_nb_pressure = std::max(nb_pressure, 0.0);
 }
 
 void ImuProcess::set_dynamics_trust(double trust)
@@ -191,7 +194,7 @@ void ImuProcess::set_thruster_meas(bool enable, const V3D &cov)
   set_thruster_accel_noise_diag(Eigen::Vector3d(cov(0), cov(1), cov(2)));
 }
 
-void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 15, input_ikfom> &kf_state, int &N)
+void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, process_noise_ikfom::DOF, input_ikfom> &kf_state, int &N)
 {
   /** 1. initializing the gravity, gyro bias, acc and gyro covariance
    ** 2. normalize the acceleration measurenments to unit gravity **/
@@ -234,11 +237,12 @@ void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 
   init_state.bg  = mean_gyr;
   init_state.omega = Zero3d;
   init_state.b_dvl = Zero3d;
+  init_state.b_pressure[0] = 0.0;
   init_state.offset_T_L_I = Lidar_T_wrt_IMU;
   init_state.offset_R_L_I = Lidar_R_wrt_IMU;
   kf_state.change_x(init_state);
 
-  esekfom::esekf<state_ikfom, 15, input_ikfom>::cov init_P = kf_state.get_P();
+  esekfom::esekf<state_ikfom, process_noise_ikfom::DOF, input_ikfom>::cov init_P = kf_state.get_P();
   init_P.setIdentity();
   init_P(6,6) = init_P(7,7) = init_P(8,8) = 0.00001;
   init_P(9,9) = init_P(10,10) = init_P(11,11) = 0.00001;
@@ -246,12 +250,13 @@ void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 
   init_P(18,18) = init_P(19,19) = init_P(20,20) = 0.001;
   init_P(21,21) = init_P(22,22) = init_P(23,23) = 0.00001;
   init_P(27,27) = init_P(28,28) = init_P(29,29) = 0.001;
+  init_P(30,30) = 4.0;
   kf_state.change_P(init_P);
   last_imu_ = meas.imu.back();
 
 }
 
-void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 15, input_ikfom> &kf_state, PointCloudXYZI &pcl_out)
+void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikfom, process_noise_ikfom::DOF, input_ikfom> &kf_state, PointCloudXYZI &pcl_out)
 {
   /*** add the imu of the last frame-tail to the of current frame-head ***/
   auto v_imu = meas.imu;
@@ -378,6 +383,7 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
     Q.block<3, 3>(6, 6).diagonal() = cov_proc_nbg;
     Q.block<3, 3>(9, 9).diagonal() = cov_proc_nba;
     Q.block<3, 3>(12, 12).diagonal() = cov_proc_nb_dvl;
+    Q(15, 15) = cov_proc_nb_pressure;
     kf_state.predict(dt, Q, in);
 
     double lambda_dyn = fastlio::dynamics::has_model() ? std::max(0.01, dynamics_model_trust_) : 1.0;
@@ -456,7 +462,7 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
   }
 }
 
-void ImuProcess::Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 15, input_ikfom> &kf_state, PointCloudXYZI::Ptr cur_pcl_un_)
+void ImuProcess::Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, process_noise_ikfom::DOF, input_ikfom> &kf_state, PointCloudXYZI::Ptr cur_pcl_un_)
 {
   double t1,t2,t3;
   t1 = omp_get_wtime();

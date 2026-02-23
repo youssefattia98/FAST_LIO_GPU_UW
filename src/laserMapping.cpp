@@ -63,6 +63,7 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
+#include <sensor_msgs/msg/fluid_pressure.hpp>
 #include <std_srvs/srv/trigger.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 #include <tf2_ros/static_transform_broadcaster.h>
@@ -104,6 +105,7 @@ condition_variable sig_buffer;
 string root_dir = ROOT_DIR;
 string map_file_path, lid_topic, imu_topic;
 string dvl_topic;
+string pressure_topic;
 string map_frame_id;
 string odom_frame_id = "camera_init";
 string body_frame_id = "body";
@@ -112,6 +114,7 @@ double res_mean_last = 0.05, total_residual = 0.0;
 double last_timestamp_lidar = 0, last_timestamp_imu = -1.0;
 double last_timestamp_thruster = -1.0;
 double last_timestamp_dvl = -1.0;
+double last_timestamp_pressure = -1.0;
 double gyr_cov = 0.1, acc_cov = 0.1, b_gyr_cov = 0.0001, b_acc_cov = 0.0001;
 double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min = 0, fov_deg = 0;
 double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
@@ -124,6 +127,14 @@ bool    is_first_lidar = true;
 bool    dvl_enabled = false;
 double  dvl_cov_floor_std = 0.01;
 double  dvl_min_speed = 0.0;
+bool    pressure_enabled = false;
+double  pressure_cov_floor_std = 4.09;
+double  pressure_reference_pa = 101325.0;
+bool    pressure_ref_initialized = false;
+double  pressure_ref_sum = 0.0;
+int     pressure_ref_count = 0;
+constexpr int kPressureRefInitSamples = 30;
+constexpr double kPressureDensityFreshWater = 997.0;
 
 vector<vector<int>>  pointSearchInd_surf; 
 vector<BoxPointType> cub_needrm;
@@ -132,11 +143,13 @@ vector<double>       extrinT(3, 0.0);
 vector<double>       extrinR(9, 0.0);
 vector<double>       dvl_extrinT(3, 0.0);
 vector<double>       dvl_extrinR(9, 0.0);
+vector<double>       pressure_extrinT(3, 0.0);
 deque<double>                     time_buffer;
 deque<PointCloudXYZI::Ptr>        lidar_buffer;
 deque<sensor_msgs::msg::Imu::ConstSharedPtr> imu_buffer;
 deque<sensor_msgs::msg::JointState::ConstSharedPtr> thruster_buffer;
 deque<geometry_msgs::msg::TwistWithCovarianceStamped::ConstSharedPtr> dvl_buffer;
+deque<sensor_msgs::msg::FluidPressure::ConstSharedPtr> pressure_buffer;
 
 PointCloudXYZI::Ptr featsFromMap(new PointCloudXYZI());
 PointCloudXYZI::Ptr feats_undistort(new PointCloudXYZI());
@@ -164,7 +177,7 @@ M3D Lidar_R_wrt_IMU(Eye3d);
 
 /*** EKF inputs and output ***/
 MeasureGroup Measures;
-esekfom::esekf<state_ikfom, 15, input_ikfom> kf;
+esekfom::esekf<state_ikfom, process_noise_ikfom::DOF, input_ikfom> kf;
 state_ikfom state_point;
 vect3 pos_lid;
 
@@ -454,6 +467,26 @@ void dvl_cbk(const geometry_msgs::msg::TwistWithCovarianceStamped::UniquePtr msg
     sig_buffer.notify_all();
 }
 
+void pressure_cbk(const sensor_msgs::msg::FluidPressure::UniquePtr msg_in)
+{
+    auto msg = sensor_msgs::msg::FluidPressure::SharedPtr(new sensor_msgs::msg::FluidPressure(*msg_in));
+    double timestamp = get_time_sec(msg->header.stamp);
+
+    mtx_buffer.lock();
+
+    if (timestamp < last_timestamp_pressure)
+    {
+        std::cerr << "Pressure loop back, clear buffer" << std::endl;
+        pressure_buffer.clear();
+    }
+
+    last_timestamp_pressure = timestamp;
+    pressure_buffer.push_back(msg);
+
+    mtx_buffer.unlock();
+    sig_buffer.notify_all();
+}
+
 double lidar_mean_scantime = 0.0;
 int    scan_num = 0;
 bool sync_packages(MeasureGroup &meas)
@@ -522,6 +555,16 @@ bool sync_packages(MeasureGroup &meas)
         if (dvl_time > lidar_end_time) break;
         meas.dvl.push_back(dvl_buffer.front());
         dvl_buffer.pop_front();
+    }
+
+    /*** push pressure data, and pop from pressure buffer ***/
+    meas.pressure.clear();
+    while (!pressure_buffer.empty())
+    {
+        double pressure_time = get_time_sec(pressure_buffer.front()->header.stamp);
+        if (pressure_time > lidar_end_time) break;
+        meas.pressure.push_back(pressure_buffer.front());
+        pressure_buffer.pop_front();
     }
 
     lidar_buffer.pop_front();
@@ -853,7 +896,7 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     double solve_start_  = omp_get_wtime();
     
     /*** Computation of Measuremnt Jacobian matrix H and measurents vector ***/
-    ekfom_data.h_x = MatrixXd::Zero(effct_feat_num, 30);
+    ekfom_data.h_x = MatrixXd::Zero(effct_feat_num, state_ikfom::DOF);
     ekfom_data.h.resize(effct_feat_num);
 
     for (int i = 0; i < effct_feat_num; i++)
@@ -873,18 +916,16 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
         /*** calculate the Measuremnt Jacobian matrix H ***/
         V3D C(s.rot.conjugate() *norm_vec);
         V3D A(point_crossmat * C);
+        auto H_i = ekfom_data.h_x.row(i);
+        H_i(0) = norm_p.x;
+        H_i(1) = norm_p.y;
+        H_i(2) = norm_p.z;
+        H_i.segment<3>(3) = A.transpose();
         if (extrinsic_est_en)
         {
             V3D B(point_be_crossmat * s.offset_R_L_I.conjugate() * C); //s.rot.conjugate()*norm_vec);
-            ekfom_data.h_x.block<1, 30>(i,0) << norm_p.x, norm_p.y, norm_p.z, VEC_FROM_ARRAY(A), VEC_FROM_ARRAY(B), VEC_FROM_ARRAY(C),
-                                                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                                                0.0, 0.0, 0.0, 0.0, 0.0, 0.0;
-        }
-        else
-        {
-            ekfom_data.h_x.block<1, 30>(i,0) << norm_p.x, norm_p.y, norm_p.z, VEC_FROM_ARRAY(A),
-                                                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                                                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0;
+            H_i.segment<3>(6) = B.transpose();
+            H_i.segment<3>(9) = C.transpose();
         }
 
         /*** Measuremnt: distance to the closest surface/corner ***/
@@ -925,6 +966,7 @@ public:
         this->declare_parameter<double>("mapping.process_noise.nbg", 0.0001);
         this->declare_parameter<double>("mapping.process_noise.nba", 0.0001);
         this->declare_parameter<double>("mapping.process_noise.nb_dvl", 0.0001);
+        this->declare_parameter<double>("mapping.process_noise.nb_pressure", 0.0001);
         this->declare_parameter<double>("preprocess.blind", 0.01);
         this->declare_parameter<int>("preprocess.lidar_type", AVIA);
         this->declare_parameter<int>("preprocess.scan_line", 16);
@@ -944,6 +986,11 @@ public:
         this->declare_parameter<vector<double>>("dvl.extrinsic_R", vector<double>());
         this->declare_parameter<double>("dvl.covariance_floor_std", 0.01);
         this->declare_parameter<double>("dvl.min_speed", 0.0);
+        this->declare_parameter<bool>("pressure.enable", false);
+        this->declare_parameter<string>("pressure.topic", "/auv/pressure/scaled2");
+        this->declare_parameter<vector<double>>("pressure.extrinsic_T", vector<double>());
+        this->declare_parameter<double>("pressure.covariance_floor_std", 4.09);
+        this->declare_parameter<double>("pressure.reference_pressure_pa", 101325.0);
         this->declare_parameter<bool>("dynamics.enable", true);
         this->declare_parameter<string>("dynamics.config_name", "default_value");
         this->declare_parameter<string>("dynamics.config_path", "");
@@ -984,11 +1031,13 @@ public:
         double proc_nbg = b_gyr_cov;
         double proc_nba = b_acc_cov;
         double proc_nb_dvl = b_acc_cov;
+        double proc_nb_pressure = b_acc_cov;
         this->get_parameter_or<double>("mapping.process_noise.nv", proc_nv, acc_cov);
         this->get_parameter_or<double>("mapping.process_noise.nw", proc_nw, gyr_cov);
         this->get_parameter_or<double>("mapping.process_noise.nbg", proc_nbg, b_gyr_cov);
         this->get_parameter_or<double>("mapping.process_noise.nba", proc_nba, b_acc_cov);
         this->get_parameter_or<double>("mapping.process_noise.nb_dvl", proc_nb_dvl, b_acc_cov);
+        this->get_parameter_or<double>("mapping.process_noise.nb_pressure", proc_nb_pressure, b_acc_cov);
         this->get_parameter_or<double>("preprocess.blind", p_pre->blind, 0.01);
         this->get_parameter_or<int>("preprocess.lidar_type", p_pre->lidar_type, AVIA);
         this->get_parameter_or<int>("preprocess.scan_line", p_pre->N_SCANS, 16);
@@ -1008,6 +1057,11 @@ public:
         this->get_parameter_or<vector<double>>("dvl.extrinsic_R", dvl_extrinR, vector<double>());
         this->get_parameter_or<double>("dvl.covariance_floor_std", dvl_cov_floor_std, 0.01);
         this->get_parameter_or<double>("dvl.min_speed", dvl_min_speed, 0.0);
+        this->get_parameter_or<bool>("pressure.enable", pressure_enabled, false);
+        this->get_parameter_or<string>("pressure.topic", pressure_topic, "/auv/pressure/scaled2");
+        this->get_parameter_or<vector<double>>("pressure.extrinsic_T", pressure_extrinT, vector<double>());
+        this->get_parameter_or<double>("pressure.covariance_floor_std", pressure_cov_floor_std, 4.09);
+        this->get_parameter_or<double>("pressure.reference_pressure_pa", pressure_reference_pa, 101325.0);
         this->get_parameter_or<bool>("dynamics.enable", dynamics_enabled_, true);
         this->get_parameter_or<string>("dynamics.config_name", dynamics_config_name_, "default_value");
         this->get_parameter_or<string>("dynamics.config_path", dynamics_config_path_, "");
@@ -1064,7 +1118,7 @@ public:
         p_imu->set_acc_bias_cov(V3D(b_acc_cov, b_acc_cov, b_acc_cov));
         p_imu->set_process_noise(V3D(proc_nv, proc_nv, proc_nv), V3D(proc_nw, proc_nw, proc_nw),
                      V3D(proc_nbg, proc_nbg, proc_nbg), V3D(proc_nba, proc_nba, proc_nba),
-                     V3D(proc_nb_dvl, proc_nb_dvl, proc_nb_dvl));
+                     V3D(proc_nb_dvl, proc_nb_dvl, proc_nb_dvl), proc_nb_pressure);
         p_imu->set_dynamics_trust(dynamics_model_trust_);
         p_imu->set_thruster_meas(thruster_meas_en_,
                                  V3D(thruster_acc_cov_, thruster_acc_cov_, thruster_acc_cov_));
@@ -1084,6 +1138,16 @@ public:
                  dvl_extrinR[3], dvl_extrinR[4], dvl_extrinR[5],
                  dvl_extrinR[6], dvl_extrinR[7], dvl_extrinR[8];
         set_dvl_mount(r_bd_b, R_b_d);
+
+        if (pressure_extrinT.size() != 3)
+        {
+            pressure_extrinT.assign(3, 0.0);
+        }
+        Eigen::Vector3d r_bp_b(pressure_extrinT[0], pressure_extrinT[1], pressure_extrinT[2]);
+        set_pressure_mount(r_bp_b);
+        pressure_ref_initialized = false;
+        pressure_ref_sum = 0.0;
+        pressure_ref_count = 0;
 
         if (dynamics_enabled_)
         {
@@ -1108,7 +1172,7 @@ public:
             }
         }
 
-        fill(epsi, epsi+30, 0.001);
+        fill(epsi, epsi + state_ikfom::DOF, 0.001);
         kf.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
 
         /*** debug record ***/
@@ -1144,6 +1208,10 @@ public:
         if (dvl_enabled)
         {
             sub_dvl_ = this->create_subscription<geometry_msgs::msg::TwistWithCovarianceStamped>(dvl_topic, 50, dvl_cbk);
+        }
+        if (pressure_enabled)
+        {
+            sub_pressure_ = this->create_subscription<sensor_msgs::msg::FluidPressure>(pressure_topic, 50, pressure_cbk);
         }
         pubLaserCloudFull_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered", 20);
         pubLaserCloudFull_body_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered_body", 20);
@@ -1242,6 +1310,48 @@ private:
                     double z_arr[3] = {z_meas(0), z_meas(1), z_meas(2)};
                     vect3 z_dvl(z_arr, 3);
                     kf.update_iterated_dyn_runtime_share(z_dvl, h_dvl_share);
+                }
+            }
+
+            if (pressure_enabled && !Measures.pressure.empty())
+            {
+                for (const auto &pressure_msg : Measures.pressure)
+                {
+                    const double p_abs = pressure_msg->fluid_pressure;
+                    if (!std::isfinite(p_abs))
+                    {
+                        continue;
+                    }
+
+                    if (!pressure_ref_initialized)
+                    {
+                        pressure_ref_sum += p_abs;
+                        pressure_ref_count++;
+                        if (pressure_ref_count >= kPressureRefInitSamples)
+                        {
+                            pressure_reference_pa = pressure_ref_sum / static_cast<double>(pressure_ref_count);
+                            pressure_ref_initialized = true;
+                            RCLCPP_INFO(this->get_logger(), "Pressure reference initialized at %.3f Pa (%d samples)",
+                                        pressure_reference_pa, pressure_ref_count);
+                        }
+                        continue;
+                    }
+
+                    const state_ikfom state_now = kf.get_x();
+                    const Eigen::Vector3d grav_world(state_now.grav[0], state_now.grav[1], state_now.grav[2]);
+                    const double grav_mag = std::max(1e-3, grav_world.norm());
+                    const double pressure_to_depth = 1.0 / (kPressureDensityFreshWater * grav_mag);
+                    const double depth = (p_abs - pressure_reference_pa) * pressure_to_depth;
+                    if (!std::isfinite(depth))
+                    {
+                        continue;
+                    }
+
+                    set_pressure_cov(pressure_cov_floor_std * pressure_cov_floor_std);
+
+                    double z_arr[1] = {depth};
+                    vect1 z_pressure(z_arr, 1);
+                    kf.update_iterated_dyn_runtime_share(z_pressure, h_pressure_share);
                 }
             }
 
@@ -1495,6 +1605,7 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu_;
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr sub_thrusters_;
     rclcpp::Subscription<geometry_msgs::msg::TwistWithCovarianceStamped>::SharedPtr sub_dvl_;
+    rclcpp::Subscription<sensor_msgs::msg::FluidPressure>::SharedPtr sub_pressure_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_pcl_pc_;
 #ifdef FASTLIO_HAS_LIVOX
     rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr sub_pcl_livox_;
@@ -1519,7 +1630,7 @@ private:
     int effect_feat_num = 0, frame_num = 0;
     double deltaT, deltaR, aver_time_consu = 0, aver_time_icp = 0, aver_time_match = 0, aver_time_incre = 0, aver_time_solve = 0, aver_time_const_H_time = 0;
     bool flg_EKF_converged, EKF_stop_flg = 0;
-    double epsi[30] = {0.001};
+    double epsi[state_ikfom::DOF] = {0.001};
 
     FILE *fp;
     ofstream fout_pre, fout_out, fout_dbg;
