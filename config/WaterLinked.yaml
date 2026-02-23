@@ -35,7 +35,7 @@
             det_range: 1.0    # max range of lidar points considered; raise to keep farther points, lower to ignore distant returns
             extrinsic_est_en:  true    # enable extrinsic estimation (true) or use fixed extrinsic (false)          
 
-            extrinsic_T: [ 0.1, 0.0, 0.1 ]
+            extrinsic_T: [ 0.093, -0.01, 0.115 ] #Lidar_T_wrt_IM
             extrinsic_R: [ 0.965925826, 0.258819045, 0.0,
                         -0.258819045, 0.965925826, 0.0,
                         0.0, 0., 1.0]
@@ -51,13 +51,13 @@
             enable: false
             config_name: "BlueROV"  # model name used by the dynamics model internals
             config_path: "/home/jetson/bluerov_ws/src/FAST_LIO_GPU_UW/config/BlueROV.conf"  # full path to libconfig .conf file
-            forces_topic: "/auv/forces_desired"
+            forces_topic: "/auv/forces_actual"
             model_trust: 1.0 # 1.0 = fully trust dynamics, 0.0 = ignore dynamics
             thruster_meas_en: true    # use dynamics-based pseudo-accel as a measurement update
             thruster_acc_cov: 1.0     # covariance for thruster-accel pseudo-measurement (m/s^2)^2
 
         dvl:
-            enable: true
+            enable: false
             topic: "/auv/dvl"
             extrinsic_T: [ 0.0, 0.0, 0.0 ]
             extrinsic_R: [ 1., 0., 0.,
