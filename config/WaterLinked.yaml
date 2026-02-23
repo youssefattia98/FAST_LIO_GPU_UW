@@ -7,7 +7,7 @@
         filter_size_map: 0.10
         cube_side_length: 3.0
         runtime_pos_log_enable: false # true writes pose log to disk; false disables logging
-        debug_metrics_enable: true    # enables concise per-N-frame debug metrics for tuning
+        debug_metrics_enable: false    # enables concise per-N-frame debug metrics for tuning
         debug_metrics_interval: 10    # emit debug metrics every N frames
         # map_file_path: "/home/attia/bags/dvl/rosbag2_2025_12_18-16_05_57/map.pcd"    # map save/load path; change to redirect outputs
 
@@ -21,31 +21,31 @@
         preprocess:
             lidar_type: 5                # 1: Livox, 2: Velodyne, 3: Ouster, 4: Mid360, 5: WaterLinked solid-state
             scan_line: 32                # number of scan lines of the LiDAR 
-            blind: 0.25
-            scan_rate: 100         
+            blind: 0.3
+            scan_rate: 150         
 
 
         mapping:
-            acc_cov: 0.3
-            gyr_cov: 0.03
+            acc_cov: 0.0001
+            gyr_cov: 0.0001
             b_acc_cov:  0.0001
             b_gyr_cov:  0.0001
 
             fov_degree: 90.0    # lidar horizontal FOV used for map segmentation
-            det_range: 1.0    # max range of lidar points considered; raise to keep farther points, lower to ignore distant returns
+            det_range: 3.0    # max range of lidar points considered; raise to keep farther points, lower to ignore distant returns
             extrinsic_est_en:  true    # enable extrinsic estimation (true) or use fixed extrinsic (false)          
 
-            extrinsic_T: [ 0.093, -0.01, 0.115 ] #Lidar_T_wrt_IM
-            extrinsic_R: [ 0.965925826, 0.258819045, 0.0,
-                        -0.258819045, 0.965925826, 0.0,
-                        0.0, 0., 1.0]
+            extrinsic_T: [ 0.093, -0.01, 0.115 ] #Lidar_T_wrt_IMU in meters; from CAD model, but can be refined by extrinsic estimation if enabled
+            extrinsic_R: [ 0.965925826, 0.0, 0.258819045,
+                            0.0,         1.0, 0.0,
+                            -0.258819045, 0.0, 0.965925826 ]
  
             process_noise:
-                nv:  1e-4   # linear acceleration process noise
-                nw:  1e-4  # angular acceleration process noise
-                nbg:  1e-7 # gyro bias random-walk (lower to restrain bias wander)
-                nba: 1e-8  # accel bias random-walk (lower to restrain bias wander)
-                nb_dvl:  0.1 # DVL bias random-walk
+                nv:  0.0001   # linear acceleration process noise
+                nw:  0.0001  # angular acceleration process noise
+                nbg:  0.0001 # gyro bias random-walk (lower to restrain bias wander)
+                nba: 0.0001  # accel bias random-walk (lower to restrain bias wander)
+                nb_dvl:  0.0001 # DVL bias random-walk
 
         dynamics:
             enable: false
@@ -57,13 +57,13 @@
             thruster_acc_cov: 1.0     # covariance for thruster-accel pseudo-measurement (m/s^2)^2
 
         dvl:
-            enable: false
+            enable: true
             topic: "/auv/dvl"
-            extrinsic_T: [ 0.0, 0.0, 0.0 ]
+            extrinsic_T: [ -0.079, -0.09691, -0.25938 ] # DVL_T_wrt_IMU in meters; from CAD model, but can be refined by extrinsic estimation if enabled
             extrinsic_R: [ 1., 0., 0.,
                         0., 1., 0.,
                         0., 0., 1.]
-            covariance_floor_std: 0.01
+            covariance_floor_std: 0.0001
             min_speed: 0.0
 
         frames:
