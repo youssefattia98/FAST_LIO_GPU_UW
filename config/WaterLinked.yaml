@@ -1,14 +1,14 @@
 /**:
     ros__parameters:
-        feature_extract_enable: false 
-        point_filter_num: 4           
-        max_iteration: 6
-        filter_size_surf: 0.08
-        filter_size_map: 0.10
+        feature_extract_enable: true 
+        point_filter_num: 3           
+        max_iteration: 3
+        filter_size_surf: 0.25
+        filter_size_map: 0.25
         cube_side_length: 3.0
         runtime_pos_log_enable: false # true writes pose log to disk; false disables logging
-        debug_metrics_enable: false    # enables concise per-N-frame debug metrics for tuning
-        debug_metrics_interval: 10    # emit debug metrics every N frames
+        debug_metrics_enable: true    # enables concise per-N-frame debug metrics for tuning
+        debug_metrics_interval: 1    # emit debug metrics every N frames
         # map_file_path: "/home/attia/bags/dvl/rosbag2_2025_12_18-16_05_57/map.pcd"    # map save/load path; change to redirect outputs
 
         common:
@@ -32,10 +32,10 @@
             b_gyr_cov:  0.0001
 
             fov_degree: 90.0    # lidar horizontal FOV used for map segmentation
-            det_range: 3.0    # max range of lidar points considered; raise to keep farther points, lower to ignore distant returns
-            extrinsic_est_en:  true    # enable extrinsic estimation (true) or use fixed extrinsic (false)          
+            det_range: 1.0    # max range of lidar points considered; raise to keep farther points, lower to ignore distant returns
+            extrinsic_est_en:  false    # enable extrinsic estimation (true) or use fixed extrinsic (false)          
 
-            extrinsic_T: [ 0.093, -0.01, 0.115 ] #Lidar_T_wrt_IMU in meters; from CAD model, but can be refined by extrinsic estimation if enabled
+            extrinsic_T: [ 0.09382, -0.02148, 0.11593 ] #Lidar_T_wrt_IMU in meters; from CAD model, but can be refined by extrinsic estimation if enabled
             extrinsic_R: [ 0.965925826, 0.0, 0.258819045,
                             0.0,         1.0, 0.0,
                             -0.258819045, 0.0, 0.965925826 ]
@@ -58,21 +58,21 @@
             thruster_acc_cov: 1.0     # covariance for thruster-accel pseudo-measurement (m/s^2)^2
 
         dvl:
-            enable: true
+            enable: false
             topic: "/auv/dvl"
             extrinsic_T: [ -0.079, -0.09691, -0.25938 ] # DVL_T_wrt_IMU in meters; from CAD model, but can be refined by extrinsic estimation if enabled
             extrinsic_R: [ 1., 0., 0.,
                         0., 1., 0.,
                         0., 0., 1.]
-            covariance_floor_std: 0.0001
+            covariance_floor_std: 1.0
             min_speed: 0.0
 
         pressure:
             enable: true
             topic: "/auv/pressure/scaled2"
-            extrinsic_T: [ 0.0, 0.0, 0.0 ] # pressure sensor position wrt IMU frame [m]
-            covariance_floor_std: 4.09 # [m], conservative from +/-400 mbar worst-case spec in fresh water
-            reference_pressure_pa: 101325.0
+            extrinsic_T: [ -0.24219, -0.03954, 0.01898] # pressure sensor position wrt IMU frame [m]
+            covariance_floor_std: 0.1
+            reference_pressure_pa: 103850.0
 
         frames:
             map_frame: "World"

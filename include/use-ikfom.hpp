@@ -359,12 +359,24 @@ inline vect3 h_dvl_share(state_ikfom &s, esekfom::dyn_runtime_share_datastruct<d
 	return out;
 }
 
+inline Eigen::Vector3d pressure_down_axis_world(const state_ikfom &s)
+{
+	Eigen::Vector3d g_world(s.grav[0], s.grav[1], s.grav[2]);
+	const double g_norm = g_world.norm();
+	if (g_norm < 1e-6)
+	{
+		// Fallback: world Z-up assumption -> down axis is -Z.
+		return Eigen::Vector3d(0.0, 0.0, -1.0);
+	}
+	return g_world / g_norm;
+}
+
 inline double pressure_meas_predict(const state_ikfom &s)
 {
-	const double z_sign = (std::abs(s.grav[2]) < 1e-6) ? -1.0 : ((s.grav[2] >= 0.0) ? 1.0 : -1.0);
 	Eigen::Vector3d p_sensor_world = Eigen::Vector3d(s.pos[0], s.pos[1], s.pos[2]) +
 	                                 s.rot.toRotationMatrix() * g_pressure_r_bp_b;
-	return z_sign * p_sensor_world(2) + s.b_pressure[0];
+	const Eigen::Vector3d down_axis_world = pressure_down_axis_world(s);
+	return down_axis_world.dot(p_sensor_world) + s.b_pressure[0];
 }
 
 inline vect1 h_pressure_share(state_ikfom &s, esekfom::dyn_runtime_share_datastruct<double> &dyn_share)
@@ -376,10 +388,10 @@ inline vect1 h_pressure_share(state_ikfom &s, esekfom::dyn_runtime_share_datastr
 	vect3 r_bp;
 	r_bp << g_pressure_r_bp_b(0), g_pressure_r_bp_b(1), g_pressure_r_bp_b(2);
 	Eigen::Matrix3d d_Rr_dtheta = -s.rot.toRotationMatrix() * MTK::hat(r_bp);
-	const double z_sign = (std::abs(s.grav[2]) < 1e-6) ? -1.0 : ((s.grav[2] >= 0.0) ? 1.0 : -1.0);
+	const Eigen::Vector3d down_axis_world = pressure_down_axis_world(s);
 
-	dyn_share.h_x.template block<1, 3>(0, 0) << 0.0, 0.0, z_sign;
-	dyn_share.h_x.template block<1, 3>(0, 3) = z_sign * d_Rr_dtheta.row(2);
+	dyn_share.h_x.template block<1, 3>(0, 0) = down_axis_world.transpose();
+	dyn_share.h_x.template block<1, 3>(0, 3) = down_axis_world.transpose() * d_Rr_dtheta;
 	dyn_share.h_x(0, 30) = 1.0;
 
 	double temp[1] = {pressure_meas_predict(s)};

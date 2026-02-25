@@ -1270,6 +1270,20 @@ private:
             state_ikfom state_pre_imu = kf.get_x();
             state_ikfom state_pre_lidar = state_pre_imu;
             state_ikfom state_post_lidar = state_pre_imu;
+            int pressure_msgs_total = 0;
+            int pressure_updates_used = 0;
+            int pressure_ref_wait_count = 0;
+            double pressure_innov_abs_sum = 0.0;
+            double pressure_innov_abs_max = 0.0;
+            double pressure_depth_last = 0.0;
+            double pressure_pred_last = 0.0;
+            double dpos_pressure = 0.0;
+            double dvel_pressure = 0.0;
+            double dz_pressure_signed_sum = 0.0;
+            double dz_pressure_signed_last = 0.0;
+            double db_pressure_sum = 0.0;
+            double db_pressure_last = 0.0;
+            bool pressure_has_update = false;
 
             match_time = 0;
             kdtree_search_time = 0.0;
@@ -1317,6 +1331,7 @@ private:
             {
                 for (const auto &pressure_msg : Measures.pressure)
                 {
+                    ++pressure_msgs_total;
                     const double p_abs = pressure_msg->fluid_pressure;
                     if (!std::isfinite(p_abs))
                     {
@@ -1327,6 +1342,7 @@ private:
                     {
                         pressure_ref_sum += p_abs;
                         pressure_ref_count++;
+                        ++pressure_ref_wait_count;
                         if (pressure_ref_count >= kPressureRefInitSamples)
                         {
                             pressure_reference_pa = pressure_ref_sum / static_cast<double>(pressure_ref_count);
@@ -1347,11 +1363,31 @@ private:
                         continue;
                     }
 
+                    const state_ikfom state_pre_pressure = kf.get_x();
+                    const double depth_pred = pressure_meas_predict(state_pre_pressure);
+                    const double abs_innov = std::abs(depth - depth_pred);
+                    pressure_innov_abs_sum += abs_innov;
+                    pressure_innov_abs_max = std::max(pressure_innov_abs_max, abs_innov);
+
                     set_pressure_cov(pressure_cov_floor_std * pressure_cov_floor_std);
 
                     double z_arr[1] = {depth};
                     vect1 z_pressure(z_arr, 1);
                     kf.update_iterated_dyn_runtime_share(z_pressure, h_pressure_share);
+
+                    const state_ikfom state_post_pressure = kf.get_x();
+                    dpos_pressure += (state_post_pressure.pos - state_pre_pressure.pos).norm();
+                    dvel_pressure += (state_post_pressure.vel - state_pre_pressure.vel).norm();
+                    const double dz_pressure = state_post_pressure.pos(2) - state_pre_pressure.pos(2);
+                    const double db_pressure = state_post_pressure.b_pressure[0] - state_pre_pressure.b_pressure[0];
+                    dz_pressure_signed_sum += dz_pressure;
+                    db_pressure_sum += db_pressure;
+                    dz_pressure_signed_last = dz_pressure;
+                    db_pressure_last = db_pressure;
+                    pressure_depth_last = depth;
+                    pressure_pred_last = depth_pred;
+                    pressure_has_update = true;
+                    ++pressure_updates_used;
                 }
             }
 
@@ -1495,6 +1531,13 @@ private:
 
                 double dpos_lidar = (state_post_lidar.pos - state_pre_lidar.pos).norm();
                 double dvel_lidar = (state_post_lidar.vel - state_pre_lidar.vel).norm();
+                double pressure_innov_abs_mean = (pressure_updates_used > 0) ?
+                    (pressure_innov_abs_sum / static_cast<double>(pressure_updates_used)) : 0.0;
+                double pressure_last_innov = pressure_has_update ? (pressure_depth_last - pressure_pred_last) : 0.0;
+                double dz_pressure_mean = (pressure_updates_used > 0) ?
+                    (dz_pressure_signed_sum / static_cast<double>(pressure_updates_used)) : 0.0;
+                double db_pressure_mean = (pressure_updates_used > 0) ?
+                    (db_pressure_sum / static_cast<double>(pressure_updates_used)) : 0.0;
 
                 double lidar_eff_ratio = (feats_down_size > 0) ? static_cast<double>(effct_feat_num) / static_cast<double>(feats_down_size) : 0.0;
                 double lidar_scan_dt = Measures.lidar_end_time - Measures.lidar_beg_time;
@@ -1525,7 +1568,7 @@ private:
                 }
 
                 RCLCPP_INFO(this->get_logger(),
-                            "[trace] t:%.3f scan_dt:%.4f tail_curv_ms:%.3f imu[n:%d dt:%.4f] pos:[%.3f %.3f %.3f] vel:[%.3f %.3f %.3f] bgz:%+.4f ba:[%.4f %.4f %.4f|n:%.4f] imu_acc:[%.3f %.3f %.3f] yaw_rate(est/meas/err):%.4f/%.4f/%+.4f gz_mean:%+.4f contrib imu[dpos:%.4f dvel:%.4f] lidar[dpos:%.4f dvel:%.4f] match[eff:%d/%d=%.2f res:%.4f]",
+                            "[trace] t:%.3f scan_dt:%.4f tail_curv_ms:%.3f imu[n:%d dt:%.4f] pos:[%.3f %.3f %.3f] vel:[%.3f %.3f %.3f] bgz:%+.4f ba:[%.4f %.4f %.4f|n:%.4f] imu_acc:[%.3f %.3f %.3f] yaw_rate(est/meas/err):%.4f/%.4f/%+.4f gz_mean:%+.4f contrib imu[dpos:%.4f dvel:%.4f] pressure[msg:%d used:%d ref_wait:%d init:%d last(z/p/e):%.3f/%.3f/%+.3f innov|e|[mean:%.3f max:%.3f] dstate[dpos:%.4f dvel:%.4f] signed[dz(sum/mean/last):%+.4f/%+.4f/%+.4f dbp(sum/mean/last):%+.5f/%+.5f/%+.5f]] lidar[dpos:%.4f dvel:%.4f] match[eff:%d/%d=%.2f res:%.4f]",
                             Measures.lidar_beg_time - first_lidar_time,
                             lidar_scan_dt,
                             last_curvature_ms,
@@ -1538,6 +1581,11 @@ private:
                             imu_ax, imu_ay, imu_az,
                             gyro_pred_z, imu_gz, gyro_pred_z - imu_gz, imu_gz_mean,
                             dpos_imu, dvel_imu,
+                            pressure_msgs_total, pressure_updates_used, pressure_ref_wait_count, pressure_ref_initialized ? 1 : 0,
+                            pressure_depth_last, pressure_pred_last, pressure_last_innov,
+                            pressure_innov_abs_mean, pressure_innov_abs_max, dpos_pressure, dvel_pressure,
+                            dz_pressure_signed_sum, dz_pressure_mean, dz_pressure_signed_last,
+                            db_pressure_sum, db_pressure_mean, db_pressure_last,
                             dpos_lidar, dvel_lidar,
                             effct_feat_num, feats_down_size, lidar_eff_ratio, res_mean_last);
             }
