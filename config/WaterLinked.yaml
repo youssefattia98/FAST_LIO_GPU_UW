@@ -2,12 +2,12 @@
     ros__parameters:
         feature_extract_enable: true 
         point_filter_num: 3           
-        max_iteration: 3
-        filter_size_surf: 0.25
-        filter_size_map: 0.25
-        cube_side_length: 3.0
+        max_iteration: 10
+        filter_size_surf: 0.2
+        filter_size_map: 0.2
+        cube_side_length: 2.0
         runtime_pos_log_enable: false # true writes pose log to disk; false disables logging
-        debug_metrics_enable: true    # enables concise per-N-frame debug metrics for tuning
+        debug_metrics_enable: false    # enables concise per-N-frame debug metrics for tuning
         debug_metrics_interval: 1    # emit debug metrics every N frames
         # map_file_path: "/home/attia/bags/dvl/rosbag2_2025_12_18-16_05_57/map.pcd"    # map save/load path; change to redirect outputs
 
@@ -27,7 +27,7 @@
 
         mapping:
             acc_cov: 0.0001
-            gyr_cov: 0.0001
+            gyr_cov: 5.0e-6
             b_acc_cov:  0.0001
             b_gyr_cov:  0.0001
 
@@ -41,9 +41,9 @@
                             -0.258819045, 0.0, 0.965925826 ]
  
             process_noise:
-                nv:  0.0001   # linear acceleration process noise
-                nw:  0.0001  # angular acceleration process noise
-                nbg:  0.0001 # gyro bias random-walk (lower to restrain bias wander)
+                nv:  1.0e-1   # linear acceleration process noise
+                nw:  1.0e-1  # angular acceleration process noise
+                nbg:  1.0e-6 # gyro bias random-walk (lower to restrain bias wander)
                 nba: 0.0001  # accel bias random-walk (lower to restrain bias wander)
                 nb_dvl:  0.0001 # DVL bias random-walk
                 nb_pressure: 0.0001 # pressure-depth bias random-walk (m^2/s)
@@ -58,7 +58,7 @@
             thruster_acc_cov: 1.0     # covariance for thruster-accel pseudo-measurement (m/s^2)^2
 
         dvl:
-            enable: false
+            enable: true
             topic: "/auv/dvl"
             extrinsic_T: [ -0.079, -0.09691, -0.25938 ] # DVL_T_wrt_IMU in meters; from CAD model, but can be refined by extrinsic estimation if enabled
             extrinsic_R: [ 1., 0., 0.,
