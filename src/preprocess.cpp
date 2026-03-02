@@ -204,7 +204,7 @@ void Preprocess::avia_handler(const livox_ros_driver2::msg::CustomMsg::UniquePtr
           if(((abs(pl_full[i].x - pl_full[i-1].x) > 1e-7)
               || (abs(pl_full[i].y - pl_full[i-1].y) > 1e-7)
               || (abs(pl_full[i].z - pl_full[i-1].z) > 1e-7))
-              && (pl_full[i].x * pl_full[i].x + pl_full[i].y * pl_full[i].y + pl_full[i].z * pl_full[i].z > (blind * blind)))
+              && range_valid_sq(pl_full[i].x * pl_full[i].x + pl_full[i].y * pl_full[i].y + pl_full[i].z * pl_full[i].z))
           {
             pl_surf.push_back(pl_full[i]);
           }
@@ -313,7 +313,7 @@ void Preprocess::oust64_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &
     float curvature = next_time(idx);
 
     double range = src_pt.x * src_pt.x + src_pt.y * src_pt.y + src_pt.z * src_pt.z;
-    if (range < (blind * blind) || ring < 0 || ring >= N_SCANS)
+    if (!range_valid_sq(range) || ring < 0 || ring >= N_SCANS)
       return;
 
     PointType added_pt;
@@ -599,7 +599,7 @@ void Preprocess::velodyne_handler(const sensor_msgs::msg::PointCloud2::UniquePtr
 
       if (i % point_filter_num == 0)
       {
-        if (added_pt.x * added_pt.x + added_pt.y * added_pt.y + added_pt.z * added_pt.z > (blind * blind))
+        if (range_valid_sq(added_pt.x * added_pt.x + added_pt.y * added_pt.y + added_pt.z * added_pt.z))
         {
           pl_surf.points.push_back(added_pt);
         }
@@ -684,7 +684,7 @@ void Preprocess::mid360_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &
     yaw_last[layer] = yaw_angle;
     time_last[layer] = added_pt.curvature;
 
-    if (added_pt.x * added_pt.x + added_pt.y * added_pt.y + added_pt.z * added_pt.z > (blind * blind))
+    if (range_valid_sq(added_pt.x * added_pt.x + added_pt.y * added_pt.y + added_pt.z * added_pt.z))
     {
       pl_surf.push_back(std::move(added_pt));
     }
@@ -727,7 +727,7 @@ void Preprocess::default_handler(const sensor_msgs::msg::PointCloud2::UniquePtr 
       added_pt.intensity = 255.0f;
       added_pt.curvature = 0.;
 
-      if (added_pt.x * added_pt.x + added_pt.y * added_pt.y + added_pt.z * added_pt.z > (blind * blind))
+      if (range_valid_sq(added_pt.x * added_pt.x + added_pt.y * added_pt.y + added_pt.z * added_pt.z))
       {
         pl_surf.push_back(std::move(added_pt));
       }
@@ -754,7 +754,7 @@ void Preprocess::default_handler(const sensor_msgs::msg::PointCloud2::UniquePtr 
     added_pt.intensity = pl_orig.points[i].intensity;
     added_pt.curvature = 0.;
 
-    if (added_pt.x * added_pt.x + added_pt.y * added_pt.y + added_pt.z * added_pt.z > (blind * blind))
+    if (range_valid_sq(added_pt.x * added_pt.x + added_pt.y * added_pt.y + added_pt.z * added_pt.z))
     {
       pl_surf.push_back(std::move(added_pt));
     }
@@ -772,9 +772,13 @@ void Preprocess::give_feature(pcl::PointCloud<PointType>& pl, vector<orgtype>& t
   }
   uint head = 0;
 
-  while (types[head].range < blind)
+  while (head < static_cast<uint>(plsize) && !range_valid(types[head].range))
   {
     head++;
+  }
+  if (head >= static_cast<uint>(plsize))
+  {
+    return;
   }
 
   // Surf
@@ -791,7 +795,7 @@ void Preprocess::give_feature(pcl::PointCloud<PointType>& pl, vector<orgtype>& t
 
   for (uint i = head; i < plsize2; i++)
   {
-    if (types[i].range < blind)
+    if (!range_valid(types[i].range))
     {
       continue;
     }
@@ -891,7 +895,7 @@ void Preprocess::give_feature(pcl::PointCloud<PointType>& pl, vector<orgtype>& t
   plsize2 = plsize > 3 ? plsize - 3 : 0;
   for (uint i = head + 3; i < plsize2; i++)
   {
-    if (types[i].range < blind || types[i].ftype >= Real_Plane)
+    if (!range_valid(types[i].range) || types[i].ftype >= Real_Plane)
     {
       continue;
     }
@@ -912,7 +916,7 @@ void Preprocess::give_feature(pcl::PointCloud<PointType>& pl, vector<orgtype>& t
         m = 1;
       }
 
-      if (types[i + m].range < blind)
+      if (!range_valid(types[i + m].range))
       {
         if (types[i].range > inf_bound)
         {
@@ -989,7 +993,7 @@ void Preprocess::give_feature(pcl::PointCloud<PointType>& pl, vector<orgtype>& t
   double ratio;
   for (uint i = head + 1; i < plsize2; i++)
   {
-    if (types[i].range < blind || types[i - 1].range < blind || types[i + 1].range < blind)
+    if (!range_valid(types[i].range) || !range_valid(types[i - 1].range) || !range_valid(types[i + 1].range))
     {
       continue;
     }
@@ -1100,7 +1104,7 @@ int Preprocess::plane_judge(const PointCloudXYZI& pl, vector<orgtype>& types, ui
 
   for (i_nex = i_cur; i_nex < i_cur + group_size; i_nex++)
   {
-    if (types[i_nex].range < blind)
+    if (!range_valid(types[i_nex].range))
     {
       curr_direct.setZero();
       return 2;
@@ -1113,7 +1117,7 @@ int Preprocess::plane_judge(const PointCloudXYZI& pl, vector<orgtype>& types, ui
     if ((i_cur >= pl.size()) || (i_nex >= pl.size()))
       break;
 
-    if (types[i_nex].range < blind)
+    if (!range_valid(types[i_nex].range))
     {
       curr_direct.setZero();
       return 2;
@@ -1207,14 +1211,14 @@ bool Preprocess::edge_jump_judge(const PointCloudXYZI& pl, vector<orgtype>& type
 {
   if (nor_dir == 0)
   {
-    if (types[i - 1].range < blind || types[i - 2].range < blind)
+    if (!range_valid(types[i - 1].range) || !range_valid(types[i - 2].range))
     {
       return false;
     }
   }
   else if (nor_dir == 1)
   {
-    if (types[i + 1].range < blind || types[i + 2].range < blind)
+    if (!range_valid(types[i + 1].range) || !range_valid(types[i + 2].range))
     {
       return false;
     }

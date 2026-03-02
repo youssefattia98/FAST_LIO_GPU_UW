@@ -123,6 +123,7 @@ int    iterCount = 0, feats_down_size = 0, NUM_MAX_ITERATIONS = 0, laserCloudVal
 bool   point_selected_surf[100000] = {0};
 bool   lidar_pushed, flg_first_scan = true, flg_exit = false, flg_EKF_inited;
 bool   scan_pub_en = false, dense_pub_en = false, scan_body_pub_en = false;
+double publish_blind_max = 0.0;
 bool    is_first_lidar = true;
 bool    dvl_enabled = false;
 double  dvl_cov_floor_std = 0.01;
@@ -631,14 +632,29 @@ void publish_frame_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::Share
     {
         PointCloudXYZI::Ptr laserCloudFullRes(dense_pub_en ? feats_undistort : feats_down_body);
         int size = laserCloudFullRes->points.size();
-        PointCloudXYZI::Ptr laserCloudWorld( \
-                        new PointCloudXYZI(size, 1));
+        PointCloudXYZI::Ptr laserCloudWorld(new PointCloudXYZI());
+        laserCloudWorld->reserve(size);
+        const double blind_max_sq = publish_blind_max > 0.0 ? publish_blind_max * publish_blind_max : 0.0;
 
         for (int i = 0; i < size; i++)
         {
-            RGBpointBodyToWorld(&laserCloudFullRes->points[i], \
-                                &laserCloudWorld->points[i]);
+            const PointType &src_pt = laserCloudFullRes->points[i];
+            if (publish_blind_max > 0.0)
+            {
+                const double range_sq = src_pt.x * src_pt.x + src_pt.y * src_pt.y + src_pt.z * src_pt.z;
+                if (range_sq >= blind_max_sq)
+                {
+                    continue;
+                }
+            }
+
+            PointType world_pt;
+            RGBpointBodyToWorld(&src_pt, &world_pt);
+            laserCloudWorld->points.push_back(world_pt);
         }
+        laserCloudWorld->width = laserCloudWorld->points.size();
+        laserCloudWorld->height = 1;
+        laserCloudWorld->is_dense = true;
 
         sensor_msgs::msg::PointCloud2 laserCloudmsg;
         pcl::toROSMsg(*laserCloudWorld, laserCloudmsg);
@@ -685,13 +701,29 @@ void publish_frame_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::Share
 void publish_frame_body(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFull_body)
 {
     int size = feats_undistort->points.size();
-    PointCloudXYZI::Ptr laserCloudIMUBody(new PointCloudXYZI(size, 1));
+    PointCloudXYZI::Ptr laserCloudIMUBody(new PointCloudXYZI());
+    laserCloudIMUBody->reserve(size);
+    const double blind_max_sq = publish_blind_max > 0.0 ? publish_blind_max * publish_blind_max : 0.0;
 
     for (int i = 0; i < size; i++)
     {
-        RGBpointBodyLidarToIMU(&feats_undistort->points[i], \
-                            &laserCloudIMUBody->points[i]);
+        const PointType &src_pt = feats_undistort->points[i];
+        if (publish_blind_max > 0.0)
+        {
+            const double range_sq = src_pt.x * src_pt.x + src_pt.y * src_pt.y + src_pt.z * src_pt.z;
+            if (range_sq >= blind_max_sq)
+            {
+                continue;
+            }
+        }
+
+        PointType body_pt;
+        RGBpointBodyLidarToIMU(&src_pt, &body_pt);
+        laserCloudIMUBody->points.push_back(body_pt);
     }
+    laserCloudIMUBody->width = laserCloudIMUBody->points.size();
+    laserCloudIMUBody->height = 1;
+    laserCloudIMUBody->is_dense = true;
 
     sensor_msgs::msg::PointCloud2 laserCloudmsg;
     pcl::toROSMsg(*laserCloudIMUBody, laserCloudmsg);
@@ -945,6 +977,7 @@ public:
         this->declare_parameter<bool>("publish.scan_publish_en", true);
         this->declare_parameter<bool>("publish.dense_publish_en", true);
         this->declare_parameter<bool>("publish.scan_bodyframe_pub_en", true);
+        this->declare_parameter<double>("publish.blind_max", 0.0);
         this->declare_parameter<int>("max_iteration", 4);
         this->declare_parameter<string>("map_file_path", "");
         this->declare_parameter<string>("common.lid_topic", "/livox/lidar");
@@ -1010,6 +1043,7 @@ public:
         this->get_parameter_or<bool>("publish.scan_publish_en", scan_pub_en, true);
         this->get_parameter_or<bool>("publish.dense_publish_en", dense_pub_en, true);
         this->get_parameter_or<bool>("publish.scan_bodyframe_pub_en", scan_body_pub_en, true);
+        this->get_parameter_or<double>("publish.blind_max", publish_blind_max, 0.0);
         this->get_parameter_or<int>("max_iteration", NUM_MAX_ITERATIONS, 4);
         this->get_parameter_or<string>("map_file_path", map_file_path, "");
         this->get_parameter_or<string>("common.lid_topic", lid_topic, "/livox/lidar");

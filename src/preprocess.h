@@ -192,6 +192,16 @@ class Preprocess
   // ros::Publisher pub_full, pub_surf, pub_corn;
 
 private:
+  bool range_valid(const double range) const
+  {
+    return range > blind;
+  }
+
+  bool range_valid_sq(const double range_sq) const
+  {
+    return range_sq > blind * blind;
+  }
+
 #ifdef FASTLIO_HAS_LIVOX
   void avia_handler(const livox_ros_driver2::msg::CustomMsg::UniquePtr &msg);
 #endif

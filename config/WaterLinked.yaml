@@ -1,13 +1,13 @@
 /**:
     ros__parameters:
         feature_extract_enable: true 
-        point_filter_num: 3           
-        max_iteration: 10
+        point_filter_num: 1         
+        max_iteration: 100
         filter_size_surf: 0.2
         filter_size_map: 0.2
         cube_side_length: 2.0
-        runtime_pos_log_enable: false # true writes pose log to disk; false disables logging
-        debug_metrics_enable: false    # enables concise per-N-frame debug metrics for tuning
+        runtime_pos_log_enable: true # true writes pose log to disk; false disables logging
+        debug_metrics_enable: false      # enables concise per-N-frame debug metrics for tuning
         debug_metrics_interval: 1    # emit debug metrics every N frames
         # map_file_path: "/home/attia/bags/dvl/rosbag2_2025_12_18-16_05_57/map.pcd"    # map save/load path; change to redirect outputs
 
@@ -21,7 +21,7 @@
         preprocess:
             lidar_type: 5                # 1: Livox, 2: Velodyne, 3: Ouster, 4: Mid360, 5: WaterLinked solid-state
             scan_line: 32                # number of scan lines of the LiDAR 
-            blind: 0.3
+            blind: 0.2
             scan_rate: 150         
 
 
@@ -32,7 +32,7 @@
             b_gyr_cov:  0.0001
 
             fov_degree: 90.0    # lidar horizontal FOV used for map segmentation
-            det_range: 1.0    # max range of lidar points considered; raise to keep farther points, lower to ignore distant returns
+            det_range: 15.0
             extrinsic_est_en:  false    # enable extrinsic estimation (true) or use fixed extrinsic (false)          
 
             extrinsic_T: [ 0.09382, -0.02148, 0.11593 ] #Lidar_T_wrt_IMU in meters; from CAD model, but can be refined by extrinsic estimation if enabled
@@ -49,7 +49,7 @@
                 nb_pressure: 0.0001 # pressure-depth bias random-walk (m^2/s)
 
         dynamics:
-            enable: false
+            enable: true
             config_name: "BlueROV"  # model name used by the dynamics model internals
             config_path: "/home/jetson/bluerov_ws/src/FAST_LIO_GPU_UW/config/BlueROV.conf"  # full path to libconfig .conf file
             forces_topic: "/auv/forces_actual"
@@ -84,6 +84,7 @@
             scan_publish_en:  true       # false: close all the point cloud output
             dense_publish_en: true       # false: low down the points number in a global-frame point clouds scan.
             scan_bodyframe_pub_en: true  # true: output the point cloud scans in IMU-body-frame
+            blind_max: 3.0               # max range [m] for published registered clouds; <=0 disables max cutoff
             map_en: true                 # enable map accumulation so /map_save writes a populated PCD
 
         map_file_path: "/home/attia/bags/no dvl/rosbag2_2025_12_18-16_37_38$"
