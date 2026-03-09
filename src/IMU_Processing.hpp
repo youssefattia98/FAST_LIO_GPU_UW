@@ -294,6 +294,7 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
   }
   size_t thr_idx = 0;
   Eigen::VectorXd thr_current;
+  const bool dynamics_available = fastlio::dynamics::has_model();
 
   /*** Initialize IMU pose ***/
   state_ikfom imu_state = kf_state.get_x();
@@ -345,7 +346,7 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
       thr_current = thr_samples[thr_idx].forces;
       ++thr_idx;
     }
-    if (thr_current.size() > 0)
+    if (dynamics_available && thr_current.size() > 0)
     {
       fastlio::dynamics::set_thruster_forces(thr_current);
     }
@@ -353,27 +354,30 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
     V3D vel_body = imu_state.vel;
     V3D vel_world = imu_state.rot * vel_body;
 
-    Eigen::Matrix<double, 6, 1> vel_body6;
-    vel_body6 << vel_body(0), vel_body(1), vel_body(2), omega_body(0), omega_body(1), omega_body(2);
-
-    vect3 euler_deg = SO3ToEuler(imu_state.rot);
-    Eigen::Vector3d euler_rad = Eigen::Vector3d(euler_deg[0], euler_deg[1], euler_deg[2]) * (PI_M / 180.0);
-    Eigen::Matrix<double, 6, 1> pose_world6;
-    pose_world6 << imu_state.pos(0), imu_state.pos(1), imu_state.pos(2), euler_rad(0), euler_rad(1), euler_rad(2);
-
     bool dyn_acc_valid = false;
     V3D specific_force_dyn = acc_avr;
-    Eigen::Matrix<double, 6, 1> accel_body6;
-    if (fastlio::dynamics::compute_body_accel(vel_body6, pose_world6, accel_body6))
+    if (dynamics_available)
     {
-      V3D grav_world(imu_state.grav[0], imu_state.grav[1], imu_state.grav[2]);
-      V3D grav_body = imu_state.rot.conjugate() * grav_world;
-      V3D acc_body_lin(accel_body6(0), accel_body6(1), accel_body6(2));
-      specific_force_dyn = acc_body_lin + omega_body.cross(vel_body) - grav_body;
-      in.acc = specific_force_dyn + imu_state.ba;
-      dyn_acc_valid = true;
+      Eigen::Matrix<double, 6, 1> vel_body6;
+      vel_body6 << vel_body(0), vel_body(1), vel_body(2), omega_body(0), omega_body(1), omega_body(2);
+
+      vect3 euler_deg = SO3ToEuler(imu_state.rot);
+      Eigen::Vector3d euler_rad = Eigen::Vector3d(euler_deg[0], euler_deg[1], euler_deg[2]) * (PI_M / 180.0);
+      Eigen::Matrix<double, 6, 1> pose_world6;
+      pose_world6 << imu_state.pos(0), imu_state.pos(1), imu_state.pos(2), euler_rad(0), euler_rad(1), euler_rad(2);
+
+      Eigen::Matrix<double, 6, 1> accel_body6;
+      if (fastlio::dynamics::compute_body_accel(vel_body6, pose_world6, accel_body6))
+      {
+        V3D grav_world(imu_state.grav[0], imu_state.grav[1], imu_state.grav[2]);
+        V3D grav_body = imu_state.rot.conjugate() * grav_world;
+        V3D acc_body_lin(accel_body6(0), accel_body6(1), accel_body6(2));
+        specific_force_dyn = acc_body_lin + omega_body.cross(vel_body) - grav_body;
+        in.acc = specific_force_dyn + imu_state.ba;
+        dyn_acc_valid = true;
+      }
     }
-    else
+    if (!dyn_acc_valid)
     {
       in.acc = acc_avr;
     }

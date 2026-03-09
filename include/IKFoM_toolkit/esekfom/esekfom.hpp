@@ -467,7 +467,11 @@ public:
 				K_temp += R_temp;
 				K_ = P_ * h_x_.transpose() * K_temp.inverse();
 			#else
-				K_= P_ * h_x_.transpose() * (h_x_ * P_ * h_x_.transpose() + h_v_ * R * h_v_.transpose()).inverse();
+				Matrix<scalar_type, l, l> S = h_x_ * P_ * h_x_.transpose() + h_v_ * R * h_v_.transpose();
+				Matrix<scalar_type, n, l> PHt = P_ * h_x_.transpose();
+				Eigen::LDLT<Matrix<scalar_type, l, l>> ldlt_S(S);
+				Matrix<scalar_type, l, n> tmp = ldlt_S.solve(PHt.transpose());
+				K_ = tmp.transpose();
 			#endif
 			}
 			else
@@ -483,8 +487,15 @@ public:
 				P_temp += K_temp;
 				K_ = P_temp.inverse() * h_x_.transpose() * R_in;
 			#else
-				measurementnoisecovariance R_in = (h_v_*R*h_v_.transpose()).inverse();
-				K_ = (h_x_.transpose() * R_in * h_x_ + P_.inverse()).inverse() * h_x_.transpose() * R_in;
+				measurementnoisecovariance Rm = h_v_ * R * h_v_.transpose();
+				Eigen::LDLT<measurementnoisecovariance> ldlt_Rm(Rm);
+				Matrix<scalar_type, l, n> Rm_inv_H = ldlt_Rm.solve(h_x_);
+				cov I_n = cov::Identity();
+				Eigen::LDLT<cov> ldlt_P(P_);
+				cov P_inv = ldlt_P.solve(I_n);
+				cov A = h_x_.transpose() * Rm_inv_H + P_inv;
+				Eigen::LDLT<cov> ldlt_A(A);
+				K_ = ldlt_A.solve(Rm_inv_H.transpose());
 			#endif 
 			}
 			Matrix<scalar_type, l, 1> innovation; 
@@ -1714,8 +1725,7 @@ public:
 				//Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> K_temp = h_x * P_ * h_x.transpose();
 				//spMt R_temp = h_v * R_ * h_v.transpose();
 				//K_temp += R_temp;
-				Eigen::Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> h_x_cur = Eigen::Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic>::Zero(dof_Measurement, n);
-				h_x_cur.topLeftCorner(dof_Measurement, n) = h_x_;
+				const Eigen::Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> &h_x_cur = h_x_;
 				/*
 				h_x_cur.col(0) = h_x_.col(0);
 				h_x_cur.col(1) = h_x_.col(1);
@@ -1730,8 +1740,11 @@ public:
 				h_x_cur.col(10) = h_x_.col(10);
 				h_x_cur.col(11) = h_x_.col(11);
 				*/
-				
-				Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> K_ = P_ * h_x_cur.transpose() * (h_x_cur * P_ * h_x_cur.transpose()/R + Eigen::Matrix<double, Dynamic, Dynamic>::Identity(dof_Measurement, dof_Measurement)).inverse()/R;
+				Matrix<scalar_type, n, Eigen::Dynamic> PHT = P_ * h_x_cur.transpose();
+				Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> S = h_x_cur * PHT;
+				S.diagonal().array() += static_cast<scalar_type>(R);
+				Eigen::LDLT<Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic>> ldlt_S(S);
+				Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> K_ = ldlt_S.solve(PHT.transpose()).transpose();
 				K_h = K_ * dyn_share.h;
 				K_x = K_ * h_x_cur;
 			//#else
@@ -1795,14 +1808,14 @@ public:
 				h_x_cur.col(10) = h_x_.col(10);
 				h_x_cur.col(11) = h_x_.col(11);
 				*/
-				cov P_inv = P_temp.inverse();
-				//std::cout << "line 1781" << std::endl;
-				K_h = P_inv. template block<n, n>(0, 0) * h_x_.transpose() * dyn_share.h;
+				Eigen::LDLT<cov> ldlt_P(P_temp);
+				Matrix<scalar_type, n, 1> rhs_h = h_x_.transpose() * dyn_share.h;
+				K_h = ldlt_P.solve(rhs_h);
 				//std::cout << "line 1780" << std::endl;
 				//cov HTH_cur = cov::Zero();
 				//HTH_cur. template block<12, 12>(0, 0) = HTH;
 				K_x.setZero(); // = cov::Zero();
-				K_x. template block<n, n>(0, 0) = P_inv. template block<n, n>(0, 0) * HTH;
+				K_x. template block<n, n>(0, 0) = ldlt_P.solve(HTH);
 				//K_= (h_x_.transpose() * h_x_ + (P_/R).inverse()).inverse()*h_x_.transpose();
 			#endif 
 			}

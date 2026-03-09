@@ -1,15 +1,14 @@
 /**:
     ros__parameters:
         feature_extract_enable: true 
-        point_filter_num: 1         
-        max_iteration: 100
+        point_filter_num: 1       
+        max_iteration: 8
         filter_size_surf: 0.2
         filter_size_map: 0.2
-        cube_side_length: 2.0
+        cube_side_length: 5.0
         runtime_pos_log_enable: true # true writes pose log to disk; false disables logging
         debug_metrics_enable: false      # enables concise per-N-frame debug metrics for tuning
         debug_metrics_interval: 1    # emit debug metrics every N frames
-        # map_file_path: "/home/attia/bags/dvl/rosbag2_2025_12_18-16_05_57/map.pcd"    # map save/load path; change to redirect outputs
 
         common:
             lid_topic:  "/sonar_point_cloud"
@@ -21,8 +20,8 @@
         preprocess:
             lidar_type: 5                # 1: Livox, 2: Velodyne, 3: Ouster, 4: Mid360, 5: WaterLinked solid-state
             scan_line: 32                # number of scan lines of the LiDAR 
-            blind: 0.2
-            scan_rate: 150         
+            blind: 2.0
+            scan_rate: 100        
 
 
         mapping:
@@ -82,10 +81,10 @@
         publish:
             path_en:  true
             scan_publish_en:  true       # false: close all the point cloud output
-            dense_publish_en: true       # false: low down the points number in a global-frame point clouds scan.
-            scan_bodyframe_pub_en: true  # true: output the point cloud scans in IMU-body-frame
-            blind_max: 3.0               # max range [m] for published registered clouds; <=0 disables max cutoff
-            map_en: true                 # enable map accumulation so /map_save writes a populated PCD
+            dense_publish_en: true      # false: low down the points number in a global-frame point clouds scan.
+            scan_bodyframe_pub_en: false  # true: output the point cloud scans in IMU-body-frame
+            blind_max: 15.0               # max range [m] for published registered clouds; <=0 disables max cutoff
+            map_en: false                # enable map accumulation so /map_save writes a populated PCD
 
         map_file_path: "/home/attia/bags/no dvl/rosbag2_2025_12_18-16_37_38$"
         pcd_save:

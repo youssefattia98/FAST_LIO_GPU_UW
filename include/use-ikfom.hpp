@@ -89,6 +89,80 @@ MTK_BUILD_MANIFOLD(process_noise_ikfom,
 constexpr int kStateDof = state_ikfom::DOF;
 constexpr int kProcessNoiseDof = process_noise_ikfom::DOF;
 
+struct DynamicsEvalCache
+{
+	bool valid = false;
+	state_ikfom cached_state;
+	Eigen::Vector3d accel_body = Eigen::Vector3d::Zero();
+
+	bool matches(const state_ikfom &s) const
+	{
+		if (!valid)
+		{
+			return false;
+		}
+		for (int i = 0; i < 3; ++i)
+		{
+			if (cached_state.pos[i] != s.pos[i] ||
+				cached_state.vel[i] != s.vel[i] ||
+				cached_state.omega[i] != s.omega[i] ||
+				cached_state.grav[i] != s.grav[i])
+			{
+				return false;
+			}
+		}
+		for (int i = 0; i < 4; ++i)
+		{
+			if (cached_state.rot.coeffs()[i] != s.rot.coeffs()[i])
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
+	void update(const state_ikfom &s, const Eigen::Vector3d &accel)
+	{
+		cached_state = s;
+		accel_body = accel;
+		valid = true;
+	}
+};
+
+inline Eigen::Vector3d get_dynamics_body_accel_cached(const state_ikfom &s)
+{
+	static thread_local DynamicsEvalCache cache;
+	if (cache.matches(s))
+	{
+		return cache.accel_body;
+	}
+
+	Eigen::Vector3d accel_body = Eigen::Vector3d::Zero();
+	if (fastlio::dynamics::has_model())
+	{
+		Eigen::Vector3d vel_body(s.vel[0], s.vel[1], s.vel[2]);
+		Eigen::Vector3d omega_body(s.omega[0], s.omega[1], s.omega[2]);
+
+		Eigen::Matrix<double, 6, 1> vel_body6;
+		vel_body6 << vel_body(0), vel_body(1), vel_body(2), omega_body(0), omega_body(1), omega_body(2);
+
+		vect3 euler_deg = SO3ToEuler(s.rot);
+		constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
+		Eigen::Vector3d euler_rad(euler_deg[0] * kDegToRad, euler_deg[1] * kDegToRad, euler_deg[2] * kDegToRad);
+		Eigen::Matrix<double, 6, 1> pose_world6;
+		pose_world6 << s.pos[0], s.pos[1], s.pos[2], euler_rad(0), euler_rad(1), euler_rad(2);
+
+		Eigen::Matrix<double, 6, 1> accel_body6;
+		if (fastlio::dynamics::compute_body_accel(vel_body6, pose_world6, accel_body6))
+		{
+			accel_body = accel_body6.head<3>();
+		}
+	}
+
+	cache.update(s, accel_body);
+	return accel_body;
+}
+
 MTK::get_cov<process_noise_ikfom>::type process_noise_cov()
 {
 	MTK::get_cov<process_noise_ikfom>::type cov = MTK::get_cov<process_noise_ikfom>::type::Zero();
@@ -246,22 +320,7 @@ inline vect3 h_imu_accel_share(state_ikfom &s, esekfom::dyn_runtime_share_datast
 
 	Eigen::Vector3d vel_body(s.vel[0], s.vel[1], s.vel[2]);
 	Eigen::Vector3d omega_body(s.omega[0], s.omega[1], s.omega[2]);
-
-	Eigen::Matrix<double, 6, 1> vel_body6;
-	vel_body6 << vel_body(0), vel_body(1), vel_body(2), omega_body(0), omega_body(1), omega_body(2);
-
-	vect3 euler_deg = SO3ToEuler(s.rot);
-	constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
-	Eigen::Vector3d euler_rad(euler_deg[0] * kDegToRad, euler_deg[1] * kDegToRad, euler_deg[2] * kDegToRad);
-	Eigen::Matrix<double, 6, 1> pose_world6;
-	pose_world6 << s.pos[0], s.pos[1], s.pos[2], euler_rad(0), euler_rad(1), euler_rad(2);
-
-	Eigen::Vector3d accel_body = Eigen::Vector3d::Zero();
-	Eigen::Matrix<double, 6, 1> accel_body6;
-	if (fastlio::dynamics::compute_body_accel(vel_body6, pose_world6, accel_body6))
-	{
-		accel_body = accel_body6.head<3>();
-	}
+	const Eigen::Vector3d accel_body = get_dynamics_body_accel_cached(s);
 
 	Eigen::Vector3d grav_world(s.grav[0], s.grav[1], s.grav[2]);
 	Eigen::Vector3d grav_body = s.rot.toRotationMatrix().transpose() * grav_world;
@@ -288,22 +347,7 @@ inline vect3 h_thruster_accel_share(state_ikfom &s, esekfom::dyn_runtime_share_d
 
 	Eigen::Vector3d vel_body(s.vel[0], s.vel[1], s.vel[2]);
 	Eigen::Vector3d omega_body(s.omega[0], s.omega[1], s.omega[2]);
-
-	Eigen::Matrix<double, 6, 1> vel_body6;
-	vel_body6 << vel_body(0), vel_body(1), vel_body(2), omega_body(0), omega_body(1), omega_body(2);
-
-	vect3 euler_deg = SO3ToEuler(s.rot);
-	constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
-	Eigen::Vector3d euler_rad(euler_deg[0] * kDegToRad, euler_deg[1] * kDegToRad, euler_deg[2] * kDegToRad);
-	Eigen::Matrix<double, 6, 1> pose_world6;
-	pose_world6 << s.pos[0], s.pos[1], s.pos[2], euler_rad(0), euler_rad(1), euler_rad(2);
-
-	Eigen::Vector3d accel_body = Eigen::Vector3d::Zero();
-	Eigen::Matrix<double, 6, 1> accel_body6;
-	if (fastlio::dynamics::compute_body_accel(vel_body6, pose_world6, accel_body6))
-	{
-		accel_body = accel_body6.head<3>();
-	}
+	const Eigen::Vector3d accel_body = get_dynamics_body_accel_cached(s);
 
 	Eigen::Vector3d grav_world(s.grav[0], s.grav[1], s.grav[2]);
 	Eigen::Vector3d grav_body = s.rot.toRotationMatrix().transpose() * grav_world;

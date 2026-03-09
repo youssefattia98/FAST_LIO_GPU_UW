@@ -33,25 +33,25 @@ endif()
 
 message("Current CPU archtecture: ${CMAKE_SYSTEM_PROCESSOR}")
 
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "(x86)|(X86)|(amd64)|(AMD64)")
-  include(ProcessorCount)
-  ProcessorCount(N)
-  message("Processer number:  ${N}")
-
-  if(N GREATER 4)
-    add_definitions(-DMP_EN)
-    add_definitions(-DMP_PROC_NUM=3)
-    message("core for MP: 3")
-  elseif(N GREATER 3)
-    add_definitions(-DMP_EN)
-    add_definitions(-DMP_PROC_NUM=2)
-    message("core for MP: 2")
-  else()
-    add_definitions(-DMP_PROC_NUM=1)
-  endif()
-else()
-  add_definitions(-DMP_PROC_NUM=1)
+include(ProcessorCount)
+ProcessorCount(N)
+if(NOT N)
+  set(N 1)
 endif()
+message("Processer number:  ${N}")
+
+set(FASTLIO_MP_THREADS 1)
+if(N GREATER 4)
+  set(FASTLIO_MP_THREADS 3)
+elseif(N GREATER 2)
+  set(FASTLIO_MP_THREADS 2)
+endif()
+
+if(FASTLIO_MP_THREADS GREATER 1)
+  add_definitions(-DMP_EN)
+endif()
+add_definitions(-DMP_PROC_NUM=${FASTLIO_MP_THREADS})
+message("core for MP: ${FASTLIO_MP_THREADS}")
 
 find_package(OpenMP QUIET)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
@@ -132,7 +132,8 @@ set(FASTLIO_SOURCES
 if(FASTLIO_USE_CUDA)
   list(APPEND FASTLIO_SOURCES
     src/gpu/preprocess_gpu.cu
-    src/gpu/gpu_voxel_map.cu)
+    src/gpu/gpu_voxel_map.cu
+    src/gpu/point_transform_gpu.cu)
 endif()
 
 add_executable(fastlio_mapping ${FASTLIO_SOURCES})

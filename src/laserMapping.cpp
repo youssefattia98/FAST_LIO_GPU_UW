@@ -40,6 +40,7 @@
 #include <fstream>
 #include <csignal>
 #include <chrono>
+#include <atomic>
 #include <unistd.h>
 #include <stdexcept>
 #include <algorithm>
@@ -77,6 +78,7 @@
 #include <ikd-Tree/ikd_Tree.h>
 #ifdef FASTLIO_USE_CUDA
 #include "gpu/gpu_voxel_map.hpp"
+#include "gpu/point_transform_gpu.hpp"
 #endif
 
 #define INIT_TIME           (0.1)
@@ -86,6 +88,7 @@
 
 /*** Time Log Variables ***/
 double kdtree_incremental_time = 0.0, kdtree_search_time = 0.0, kdtree_delete_time = 0.0;
+double stage_downsample_time = 0.0, stage_transform_time = 0.0, stage_knn_time = 0.0, stage_map_add_time = 0.0;
 double T1[MAXN], s_plot[MAXN], s_plot2[MAXN], s_plot3[MAXN], s_plot4[MAXN], s_plot5[MAXN], s_plot6[MAXN], s_plot7[MAXN], s_plot8[MAXN], s_plot9[MAXN], s_plot10[MAXN], s_plot11[MAXN];
 double match_time = 0, solve_time = 0, solve_const_H_time = 0;
 int    kdtree_size_st = 0, kdtree_size_end = 0, add_point_size = 0, kdtree_delete_counter = 0;
@@ -101,6 +104,7 @@ double time_diff_lidar_to_imu = 0.0;
 
 mutex mtx_buffer;
 condition_variable sig_buffer;
+std::atomic<bool> process_wakeup_requested{false};
 
 string root_dir = ROOT_DIR;
 string map_file_path, lid_topic, imu_topic;
@@ -165,6 +169,7 @@ pcl::VoxelGrid<PointType> downSizeFilterSurf;
 pcl::VoxelGrid<PointType> downSizeFilterMap;
 #ifdef FASTLIO_USE_CUDA
 std::unique_ptr<fastlio::gpu::VoxelDownsampler> gpu_downsampler_surf;
+std::unique_ptr<fastlio::gpu::PointTransformer> gpu_point_transformer;
 #endif
 
 KD_TREE<PointType> ikdtree;
@@ -350,6 +355,7 @@ void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::UniquePtr msg)
     last_timestamp_lidar = cur_time;
     s_plot11[scan_count] = omp_get_wtime() - preprocess_start_time;
     mtx_buffer.unlock();
+    process_wakeup_requested.store(true, std::memory_order_release);
     sig_buffer.notify_all();
 }
 
@@ -392,6 +398,7 @@ void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::UniquePtr msg)
     
     s_plot11[scan_count] = omp_get_wtime() - preprocess_start_time;
     mtx_buffer.unlock();
+    process_wakeup_requested.store(true, std::memory_order_release);
     sig_buffer.notify_all();
 }
 #endif
@@ -424,6 +431,7 @@ void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in)
 
     imu_buffer.push_back(msg);
     mtx_buffer.unlock();
+    process_wakeup_requested.store(true, std::memory_order_release);
     sig_buffer.notify_all();
 }
 
@@ -444,6 +452,7 @@ void thruster_cbk(const sensor_msgs::msg::JointState::UniquePtr msg_in)
     thruster_buffer.push_back(msg);
 
     mtx_buffer.unlock();
+    process_wakeup_requested.store(true, std::memory_order_release);
     sig_buffer.notify_all();
 }
 
@@ -465,6 +474,7 @@ void dvl_cbk(const geometry_msgs::msg::TwistWithCovarianceStamped::UniquePtr msg
     dvl_buffer.push_back(msg);
 
     mtx_buffer.unlock();
+    process_wakeup_requested.store(true, std::memory_order_release);
     sig_buffer.notify_all();
 }
 
@@ -485,6 +495,7 @@ void pressure_cbk(const sensor_msgs::msg::FluidPressure::UniquePtr msg_in)
     pressure_buffer.push_back(msg);
 
     mtx_buffer.unlock();
+    process_wakeup_requested.store(true, std::memory_order_release);
     sig_buffer.notify_all();
 }
 
@@ -492,6 +503,8 @@ double lidar_mean_scantime = 0.0;
 int    scan_num = 0;
 bool sync_packages(MeasureGroup &meas)
 {
+    std::lock_guard<std::mutex> lock(mtx_buffer);
+
     if (lidar_buffer.empty() || imu_buffer.empty()) {
         return false;
     }
@@ -581,10 +594,36 @@ void map_incremental()
     PointVector PointNoNeedDownsample;
     PointToAdd.reserve(feats_down_size);
     PointNoNeedDownsample.reserve(feats_down_size);
+
+#ifdef FASTLIO_USE_CUDA
+    bool transformed_on_gpu = false;
+    if (gpu_point_transformer && gpu_point_transformer->available())
+    {
+        const double transform_start = omp_get_wtime();
+        const Eigen::Matrix3d rot_world_body_d = state_point.rot.toRotationMatrix();
+        const Eigen::Matrix3d rot_body_lidar_d = state_point.offset_R_L_I.toRotationMatrix();
+        const Eigen::Matrix3d rot_world_lidar_d = rot_world_body_d * rot_body_lidar_d;
+        const Eigen::Vector3d t_body_lidar_d(state_point.offset_T_L_I[0], state_point.offset_T_L_I[1], state_point.offset_T_L_I[2]);
+        const Eigen::Vector3d t_world_lidar_d = rot_world_body_d * t_body_lidar_d + Eigen::Vector3d(state_point.pos[0], state_point.pos[1], state_point.pos[2]);
+
+        transformed_on_gpu = gpu_point_transformer->transform(*feats_down_body,
+                                                               *feats_down_world,
+                                                               rot_world_lidar_d.cast<float>(),
+                                                               t_world_lidar_d.cast<float>());
+        stage_transform_time += omp_get_wtime() - transform_start;
+    }
+#endif
+
+    const double transform_start_cpu = omp_get_wtime();
     for (int i = 0; i < feats_down_size; i++)
     {
         /* transform to world frame */
-        pointBodyToWorld(&(feats_down_body->points[i]), &(feats_down_world->points[i]));
+        #ifdef FASTLIO_USE_CUDA
+        if (!transformed_on_gpu)
+        #endif
+        {
+            pointBodyToWorld(&(feats_down_body->points[i]), &(feats_down_world->points[i]));
+        }
         /* decide if need add to map */
         if (!Nearest_Points[i].empty() && flg_EKF_inited)
         {
@@ -616,45 +655,89 @@ void map_incremental()
             PointToAdd.push_back(feats_down_world->points[i]);
         }
     }
+    if (!transformed_on_gpu)
+    {
+        stage_transform_time += omp_get_wtime() - transform_start_cpu;
+    }
 
     double st_time = omp_get_wtime();
     add_point_size = ikdtree.Add_Points(PointToAdd, true);
     ikdtree.Add_Points(PointNoNeedDownsample, false); 
     add_point_size = PointToAdd.size() + PointNoNeedDownsample.size();
     kdtree_incremental_time = omp_get_wtime() - st_time;
+    stage_map_add_time += kdtree_incremental_time;
 }
 
 PointCloudXYZI::Ptr pcl_wait_pub(new PointCloudXYZI());
 PointCloudXYZI::Ptr pcl_wait_save(new PointCloudXYZI());
+PointCloudXYZI::Ptr publish_world_buffer(new PointCloudXYZI());
+PointCloudXYZI::Ptr publish_body_buffer(new PointCloudXYZI());
+PointCloudXYZI::Ptr publish_effect_buffer(new PointCloudXYZI());
+PointCloudXYZI::Ptr publish_world_filter_buffer(new PointCloudXYZI());
+PointCloudXYZI::Ptr publish_body_filter_buffer(new PointCloudXYZI());
 void publish_frame_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFull)
 {
     if(scan_pub_en)
     {
         PointCloudXYZI::Ptr laserCloudFullRes(dense_pub_en ? feats_undistort : feats_down_body);
+        PointCloudXYZI::Ptr cloud_for_transform = laserCloudFullRes;
         int size = laserCloudFullRes->points.size();
-        PointCloudXYZI::Ptr laserCloudWorld(new PointCloudXYZI());
+        PointCloudXYZI::Ptr laserCloudWorld = publish_world_buffer;
+        laserCloudWorld->clear();
         laserCloudWorld->reserve(size);
         const double blind_max_sq = publish_blind_max > 0.0 ? publish_blind_max * publish_blind_max : 0.0;
 
-        for (int i = 0; i < size; i++)
+        if (publish_blind_max > 0.0)
         {
-            const PointType &src_pt = laserCloudFullRes->points[i];
-            if (publish_blind_max > 0.0)
+            PointCloudXYZI::Ptr filtered = publish_world_filter_buffer;
+            filtered->clear();
+            filtered->reserve(size);
+            for (int i = 0; i < size; i++)
             {
+                const PointType &src_pt = laserCloudFullRes->points[i];
                 const double range_sq = src_pt.x * src_pt.x + src_pt.y * src_pt.y + src_pt.z * src_pt.z;
-                if (range_sq >= blind_max_sq)
+                if (range_sq < blind_max_sq)
                 {
-                    continue;
+                    filtered->points.push_back(src_pt);
                 }
             }
-
-            PointType world_pt;
-            RGBpointBodyToWorld(&src_pt, &world_pt);
-            laserCloudWorld->points.push_back(world_pt);
+            filtered->width = filtered->points.size();
+            filtered->height = 1;
+            filtered->is_dense = true;
+            cloud_for_transform = filtered;
+            size = static_cast<int>(cloud_for_transform->points.size());
         }
-        laserCloudWorld->width = laserCloudWorld->points.size();
-        laserCloudWorld->height = 1;
-        laserCloudWorld->is_dense = true;
+
+        bool transformed_on_gpu = false;
+#ifdef FASTLIO_USE_CUDA
+        if (gpu_point_transformer && gpu_point_transformer->available() && size > 0)
+        {
+            const Eigen::Matrix3d rot_world_body_d = state_point.rot.toRotationMatrix();
+            const Eigen::Matrix3d rot_body_lidar_d = state_point.offset_R_L_I.toRotationMatrix();
+            const Eigen::Matrix3d rot_world_lidar_d = rot_world_body_d * rot_body_lidar_d;
+            const Eigen::Vector3d t_body_lidar_d(state_point.offset_T_L_I[0], state_point.offset_T_L_I[1], state_point.offset_T_L_I[2]);
+            const Eigen::Vector3d t_world_lidar_d = rot_world_body_d * t_body_lidar_d + Eigen::Vector3d(state_point.pos[0], state_point.pos[1], state_point.pos[2]);
+            transformed_on_gpu = gpu_point_transformer->transform(*cloud_for_transform,
+                                                                   *laserCloudWorld,
+                                                                   rot_world_lidar_d.cast<float>(),
+                                                                   t_world_lidar_d.cast<float>());
+        }
+#endif
+
+        if (!transformed_on_gpu)
+        {
+            for (int i = 0; i < size; i++)
+            {
+                const PointType &src_pt = cloud_for_transform->points[i];
+
+                PointType world_pt;
+                RGBpointBodyToWorld(&src_pt, &world_pt);
+                laserCloudWorld->points.push_back(world_pt);
+            }
+            laserCloudWorld->width = laserCloudWorld->points.size();
+            laserCloudWorld->height = 1;
+            laserCloudWorld->is_dense = true;
+        }
 
         sensor_msgs::msg::PointCloud2 laserCloudmsg;
         pcl::toROSMsg(*laserCloudWorld, laserCloudmsg);
@@ -700,30 +783,61 @@ void publish_frame_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::Share
 
 void publish_frame_body(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFull_body)
 {
+    PointCloudXYZI::Ptr cloud_for_transform = feats_undistort;
     int size = feats_undistort->points.size();
-    PointCloudXYZI::Ptr laserCloudIMUBody(new PointCloudXYZI());
+    PointCloudXYZI::Ptr laserCloudIMUBody = publish_body_buffer;
+    laserCloudIMUBody->clear();
     laserCloudIMUBody->reserve(size);
     const double blind_max_sq = publish_blind_max > 0.0 ? publish_blind_max * publish_blind_max : 0.0;
 
-    for (int i = 0; i < size; i++)
+    if (publish_blind_max > 0.0)
     {
-        const PointType &src_pt = feats_undistort->points[i];
-        if (publish_blind_max > 0.0)
+        PointCloudXYZI::Ptr filtered = publish_body_filter_buffer;
+        filtered->clear();
+        filtered->reserve(size);
+        for (int i = 0; i < size; i++)
         {
+            const PointType &src_pt = feats_undistort->points[i];
             const double range_sq = src_pt.x * src_pt.x + src_pt.y * src_pt.y + src_pt.z * src_pt.z;
-            if (range_sq >= blind_max_sq)
+            if (range_sq < blind_max_sq)
             {
-                continue;
+                filtered->points.push_back(src_pt);
             }
         }
-
-        PointType body_pt;
-        RGBpointBodyLidarToIMU(&src_pt, &body_pt);
-        laserCloudIMUBody->points.push_back(body_pt);
+        filtered->width = filtered->points.size();
+        filtered->height = 1;
+        filtered->is_dense = true;
+        cloud_for_transform = filtered;
+        size = static_cast<int>(cloud_for_transform->points.size());
     }
-    laserCloudIMUBody->width = laserCloudIMUBody->points.size();
-    laserCloudIMUBody->height = 1;
-    laserCloudIMUBody->is_dense = true;
+
+    bool transformed_on_gpu = false;
+#ifdef FASTLIO_USE_CUDA
+    if (gpu_point_transformer && gpu_point_transformer->available() && size > 0)
+    {
+        const Eigen::Matrix3d rot_body_lidar_d = state_point.offset_R_L_I.toRotationMatrix();
+        const Eigen::Vector3d t_body_lidar_d(state_point.offset_T_L_I[0], state_point.offset_T_L_I[1], state_point.offset_T_L_I[2]);
+        transformed_on_gpu = gpu_point_transformer->transform(*cloud_for_transform,
+                                                               *laserCloudIMUBody,
+                                                               rot_body_lidar_d.cast<float>(),
+                                                               t_body_lidar_d.cast<float>());
+    }
+#endif
+
+    if (!transformed_on_gpu)
+    {
+        for (int i = 0; i < size; i++)
+        {
+            const PointType &src_pt = cloud_for_transform->points[i];
+
+            PointType body_pt;
+            RGBpointBodyLidarToIMU(&src_pt, &body_pt);
+            laserCloudIMUBody->points.push_back(body_pt);
+        }
+        laserCloudIMUBody->width = laserCloudIMUBody->points.size();
+        laserCloudIMUBody->height = 1;
+        laserCloudIMUBody->is_dense = true;
+    }
 
     sensor_msgs::msg::PointCloud2 laserCloudmsg;
     pcl::toROSMsg(*laserCloudIMUBody, laserCloudmsg);
@@ -735,13 +849,17 @@ void publish_frame_body(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::Shared
 
 void publish_effect_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudEffect)
 {
-    PointCloudXYZI::Ptr laserCloudWorld( \
-                    new PointCloudXYZI(effct_feat_num, 1));
+    PointCloudXYZI::Ptr laserCloudWorld = publish_effect_buffer;
+    laserCloudWorld->clear();
+    laserCloudWorld->resize(effct_feat_num);
     for (int i = 0; i < effct_feat_num; i++)
     {
         RGBpointBodyToWorld(&laserCloudOri->points[i], \
                             &laserCloudWorld->points[i]);
     }
+    laserCloudWorld->width = laserCloudWorld->points.size();
+    laserCloudWorld->height = 1;
+    laserCloudWorld->is_dense = true;
     sensor_msgs::msg::PointCloud2 laserCloudFullRes3;
     pcl::toROSMsg(*laserCloudWorld, laserCloudFullRes3);
     laserCloudFullRes3.header.stamp = get_ros_time(lidar_end_time);
@@ -852,32 +970,72 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     corr_normvect->clear(); 
     total_residual = 0.0; 
 
+#ifdef FASTLIO_USE_CUDA
+    bool transformed_on_gpu = false;
+    if (gpu_point_transformer && gpu_point_transformer->available())
+    {
+        const double transform_start = omp_get_wtime();
+        const Eigen::Matrix3d rot_world_body_d = s.rot.toRotationMatrix();
+        const Eigen::Matrix3d rot_body_lidar_d = s.offset_R_L_I.toRotationMatrix();
+        const Eigen::Matrix3d rot_world_lidar_d = rot_world_body_d * rot_body_lidar_d;
+        const Eigen::Vector3d t_body_lidar_d(s.offset_T_L_I[0], s.offset_T_L_I[1], s.offset_T_L_I[2]);
+        const Eigen::Vector3d t_world_lidar_d = rot_world_body_d * t_body_lidar_d + Eigen::Vector3d(s.pos[0], s.pos[1], s.pos[2]);
+
+        transformed_on_gpu = gpu_point_transformer->transform(*feats_down_body,
+                                                               *feats_down_world,
+                                                               rot_world_lidar_d.cast<float>(),
+                                                               t_world_lidar_d.cast<float>());
+        stage_transform_time += omp_get_wtime() - transform_start;
+    }
+#endif
+
+    if (!transformed_on_gpu)
+    {
+        const double transform_start_cpu = omp_get_wtime();
+        #ifdef MP_EN
+            #pragma omp parallel for
+        #endif
+        for (int i = 0; i < feats_down_size; i++)
+        {
+            PointType &point_body  = feats_down_body->points[i];
+            PointType &point_world = feats_down_world->points[i];
+            V3D p_body(point_body.x, point_body.y, point_body.z);
+            V3D p_global(s.rot * (s.offset_R_L_I*p_body + s.offset_T_L_I) + s.pos);
+            point_world.x = p_global(0);
+            point_world.y = p_global(1);
+            point_world.z = p_global(2);
+            point_world.intensity = point_body.intensity;
+        }
+        stage_transform_time += omp_get_wtime() - transform_start_cpu;
+    }
+
+    const bool perform_knn_search = ekfom_data.converge;
+    double knn_stage_local = 0.0;
+
     /** closest surface search and residual computation **/
     #ifdef MP_EN
-        omp_set_num_threads(MP_PROC_NUM);
         #pragma omp parallel for
     #endif
     for (int i = 0; i < feats_down_size; i++)
     {
         PointType &point_body  = feats_down_body->points[i]; 
         PointType &point_world = feats_down_world->points[i]; 
-
-        /* transform to world frame */
         V3D p_body(point_body.x, point_body.y, point_body.z);
-        V3D p_global(s.rot * (s.offset_R_L_I*p_body + s.offset_T_L_I) + s.pos);
-        point_world.x = p_global(0);
-        point_world.y = p_global(1);
-        point_world.z = p_global(2);
-        point_world.intensity = point_body.intensity;
 
-        vector<float> pointSearchSqDis(NUM_MATCH_POINTS);
+        static thread_local vector<float> pointSearchSqDis;
+        if (pointSearchSqDis.size() != NUM_MATCH_POINTS)
+        {
+            pointSearchSqDis.resize(NUM_MATCH_POINTS);
+        }
 
         auto &points_near = Nearest_Points[i];
 
-        if (ekfom_data.converge)
+        if (perform_knn_search)
         {
             /** Find the closest surfaces in the map **/
+            const double knn_start = omp_get_wtime();
             ikdtree.Nearest_Search(point_world, NUM_MATCH_POINTS, points_near, pointSearchSqDis);
+            knn_stage_local += omp_get_wtime() - knn_start;
             point_selected_surf[i] = points_near.size() < NUM_MATCH_POINTS ? false : pointSearchSqDis[NUM_MATCH_POINTS - 1] > 5 ? false : true;
         }
 
@@ -901,6 +1059,8 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
             }
         }
     }
+    stage_knn_time += knn_stage_local;
+    kdtree_search_time += knn_stage_local;
     
     effct_feat_num = 0;
 
@@ -1109,6 +1269,10 @@ public:
         this->get_parameter_or<bool>("debug_metrics_enable", debug_metrics_en, false);
         this->get_parameter_or<int>("debug_metrics_interval", debug_metrics_interval, 30);
 
+    #ifdef MP_EN
+        omp_set_num_threads(MP_PROC_NUM);
+    #endif
+
         RCLCPP_INFO(this->get_logger(), "p_pre->lidar_type %d", p_pre->lidar_type);
 
         path.header.stamp = this->get_clock()->now();
@@ -1138,6 +1302,16 @@ public:
     {
         gpu_downsampler_surf->set_leaf_size(static_cast<float>(filter_size_surf_min));
         RCLCPP_INFO(this->get_logger(), "GPU voxel downsampler initialized (leaf: %.3fm)", filter_size_surf_min);
+    }
+
+    gpu_point_transformer = std::make_unique<fastlio::gpu::PointTransformer>();
+    if (gpu_point_transformer && !gpu_point_transformer->available())
+    {
+        RCLCPP_WARN(this->get_logger(), "GPU point transformer unavailable, using CPU transforms");
+    }
+    else if (gpu_point_transformer)
+    {
+        RCLCPP_INFO(this->get_logger(), "GPU point transformer initialized for correspondence/map updates");
     }
 #endif
         memset(point_selected_surf, true, sizeof(point_selected_surf));
@@ -1215,13 +1389,16 @@ public:
         fp = fopen(pos_log_dir.c_str(),"w");
 
         // ofstream fout_pre, fout_out, fout_dbg;
-        fout_pre.open(DEBUG_FILE_DIR("mat_pre.txt"),ios::out);
-        fout_out.open(DEBUG_FILE_DIR("mat_out.txt"),ios::out);
-        fout_dbg.open(DEBUG_FILE_DIR("dbg.txt"),ios::out);
-        if (fout_pre && fout_out)
-            cout << "~~~~"<<ROOT_DIR<<" file opened" << endl;
-        else
-            cout << "~~~~"<<ROOT_DIR<<" doesn't exist" << endl;
+        if (runtime_pos_log)
+        {
+            fout_pre.open(DEBUG_FILE_DIR("mat_pre.txt"),ios::out);
+            fout_out.open(DEBUG_FILE_DIR("mat_out.txt"),ios::out);
+            fout_dbg.open(DEBUG_FILE_DIR("dbg.txt"),ios::out);
+            if (fout_pre && fout_out)
+                cout << "~~~~"<<ROOT_DIR<<" file opened" << endl;
+            else
+                cout << "~~~~"<<ROOT_DIR<<" doesn't exist" << endl;
+        }
 
         /*** ROS subscribe initialization ***/
         if (p_pre->lidar_type == AVIA)
@@ -1269,8 +1446,8 @@ public:
     static_tf_broadcaster_->sendTransform(map_to_camera);
 
         //------------------------------------------------------------------------------------------------------
-        auto period_ms = std::chrono::milliseconds(static_cast<int64_t>(1000.0 / 100.0));
-        timer_ = rclcpp::create_timer(this, this->get_clock(), period_ms, std::bind(&LaserMappingNode::timer_callback, this));
+        processing_worker_running_.store(true, std::memory_order_release);
+        processing_thread_ = std::thread(&LaserMappingNode::processing_worker_loop, this);
 
         auto map_period_ms = std::chrono::milliseconds(static_cast<int64_t>(1000.0));
         map_pub_timer_ = rclcpp::create_timer(this, this->get_clock(), map_period_ms, std::bind(&LaserMappingNode::map_publish_callback, this));
@@ -1282,15 +1459,38 @@ public:
 
     ~LaserMappingNode()
     {
-        fout_out.close();
-        fout_pre.close();
-        fclose(fp);
+        processing_worker_running_.store(false, std::memory_order_release);
+        process_wakeup_requested.store(true, std::memory_order_release);
+        sig_buffer.notify_all();
+        if (processing_thread_.joinable())
+        {
+            processing_thread_.join();
+        }
+        if (fout_out.is_open()) fout_out.close();
+        if (fout_pre.is_open()) fout_pre.close();
+        if (fout_dbg.is_open()) fout_dbg.close();
+        if (fp != nullptr) fclose(fp);
     }
 
 private:
-    void timer_callback()
+    void processing_worker_loop()
     {
-        if(sync_packages(Measures))
+        while (processing_worker_running_.load(std::memory_order_acquire) && rclcpp::ok() && !flg_exit)
+        {
+            std::unique_lock<std::mutex> lock(mtx_buffer);
+            sig_buffer.wait(lock, [] {
+                return flg_exit || process_wakeup_requested.load(std::memory_order_acquire);
+            });
+            process_wakeup_requested.store(false, std::memory_order_release);
+            lock.unlock();
+
+            process_available_scans();
+        }
+    }
+
+    void process_available_scans()
+    {
+        while(sync_packages(Measures))
         {
             if (flg_first_scan)
             {
@@ -1325,6 +1525,12 @@ private:
             solve_const_H_time = 0;
             svd_time   = 0;
             t0 = omp_get_wtime();
+            stage_downsample_time = 0.0;
+            stage_transform_time = 0.0;
+            stage_knn_time = 0.0;
+            stage_map_add_time = 0.0;
+            kdtree_search_time = 0.0;
+            kdtree_incremental_time = 0.0;
 
             p_imu->Process(Measures, kf, feats_undistort);
 
@@ -1365,7 +1571,10 @@ private:
             {
                 for (const auto &pressure_msg : Measures.pressure)
                 {
-                    ++pressure_msgs_total;
+                    if (debug_metrics_en)
+                    {
+                        ++pressure_msgs_total;
+                    }
                     const double p_abs = pressure_msg->fluid_pressure;
                     if (!std::isfinite(p_abs))
                     {
@@ -1376,7 +1585,10 @@ private:
                     {
                         pressure_ref_sum += p_abs;
                         pressure_ref_count++;
-                        ++pressure_ref_wait_count;
+                        if (debug_metrics_en)
+                        {
+                            ++pressure_ref_wait_count;
+                        }
                         if (pressure_ref_count >= kPressureRefInitSamples)
                         {
                             pressure_reference_pa = pressure_ref_sum / static_cast<double>(pressure_ref_count);
@@ -1387,8 +1599,8 @@ private:
                         continue;
                     }
 
-                    const state_ikfom state_now = kf.get_x();
-                    const Eigen::Vector3d grav_world(state_now.grav[0], state_now.grav[1], state_now.grav[2]);
+                    const state_ikfom state_pre_pressure = kf.get_x();
+                    const Eigen::Vector3d grav_world(state_pre_pressure.grav[0], state_pre_pressure.grav[1], state_pre_pressure.grav[2]);
                     const double grav_mag = std::max(1e-3, grav_world.norm());
                     const double pressure_to_depth = 1.0 / (kPressureDensityFreshWater * grav_mag);
                     const double depth = (p_abs - pressure_reference_pa) * pressure_to_depth;
@@ -1397,11 +1609,13 @@ private:
                         continue;
                     }
 
-                    const state_ikfom state_pre_pressure = kf.get_x();
                     const double depth_pred = pressure_meas_predict(state_pre_pressure);
-                    const double abs_innov = std::abs(depth - depth_pred);
-                    pressure_innov_abs_sum += abs_innov;
-                    pressure_innov_abs_max = std::max(pressure_innov_abs_max, abs_innov);
+                    if (debug_metrics_en)
+                    {
+                        const double abs_innov = std::abs(depth - depth_pred);
+                        pressure_innov_abs_sum += abs_innov;
+                        pressure_innov_abs_max = std::max(pressure_innov_abs_max, abs_innov);
+                    }
 
                     set_pressure_cov(pressure_cov_floor_std * pressure_cov_floor_std);
 
@@ -1409,19 +1623,25 @@ private:
                     vect1 z_pressure(z_arr, 1);
                     kf.update_iterated_dyn_runtime_share(z_pressure, h_pressure_share);
 
-                    const state_ikfom state_post_pressure = kf.get_x();
-                    dpos_pressure += (state_post_pressure.pos - state_pre_pressure.pos).norm();
-                    dvel_pressure += (state_post_pressure.vel - state_pre_pressure.vel).norm();
-                    const double dz_pressure = state_post_pressure.pos(2) - state_pre_pressure.pos(2);
-                    const double db_pressure = state_post_pressure.b_pressure[0] - state_pre_pressure.b_pressure[0];
-                    dz_pressure_signed_sum += dz_pressure;
-                    db_pressure_sum += db_pressure;
-                    dz_pressure_signed_last = dz_pressure;
-                    db_pressure_last = db_pressure;
+                    if (debug_metrics_en)
+                    {
+                        const state_ikfom state_post_pressure = kf.get_x();
+                        dpos_pressure += (state_post_pressure.pos - state_pre_pressure.pos).norm();
+                        dvel_pressure += (state_post_pressure.vel - state_pre_pressure.vel).norm();
+                        const double dz_pressure = state_post_pressure.pos(2) - state_pre_pressure.pos(2);
+                        const double db_pressure = state_post_pressure.b_pressure[0] - state_pre_pressure.b_pressure[0];
+                        dz_pressure_signed_sum += dz_pressure;
+                        db_pressure_sum += db_pressure;
+                        dz_pressure_signed_last = dz_pressure;
+                        db_pressure_last = db_pressure;
+                    }
                     pressure_depth_last = depth;
                     pressure_pred_last = depth_pred;
-                    pressure_has_update = true;
-                    ++pressure_updates_used;
+                    if (debug_metrics_en)
+                    {
+                        pressure_has_update = true;
+                        ++pressure_updates_used;
+                    }
                 }
             }
 
@@ -1442,6 +1662,7 @@ private:
             lasermap_fov_segment();
 
             /*** downsample the feature points in a scan ***/
+            const double downsample_stage_start = omp_get_wtime();
 #ifdef FASTLIO_USE_CUDA
             static bool logged_gpu_downsample_once = false;
             static bool logged_gpu_downsample_fallback = false;
@@ -1466,6 +1687,7 @@ private:
                 downSizeFilterSurf.setInputCloud(feats_undistort);
                 downSizeFilterSurf.filter(*feats_down_body);
             }
+            stage_downsample_time = omp_get_wtime() - downsample_stage_start;
             t1 = omp_get_wtime();
             feats_down_size = feats_down_body->points.size();
             /*** initialize the map kdtree ***/
@@ -1500,8 +1722,11 @@ private:
             feats_down_world->resize(feats_down_size);
 
             V3D ext_euler = SO3ToEuler(state_point.offset_R_L_I);
-            fout_pre<<setw(20)<<Measures.lidar_beg_time - first_lidar_time<<" "<<euler_cur.transpose()<<" "<< state_point.pos.transpose()<<" "<<ext_euler.transpose() << " "<<state_point.offset_T_L_I.transpose()<< " " << state_point.vel.transpose() \
-            <<" "<<state_point.bg.transpose()<<" "<<state_point.ba.transpose()<<" "<<state_point.grav<< endl;
+            if (runtime_pos_log)
+            {
+                fout_pre<<setw(20)<<Measures.lidar_beg_time - first_lidar_time<<" "<<euler_cur.transpose()<<" "<< state_point.pos.transpose()<<" "<<ext_euler.transpose() << " "<<state_point.offset_T_L_I.transpose()<< " " << state_point.vel.transpose() \
+                <<" "<<state_point.bg.transpose()<<" "<<state_point.ba.transpose()<<" "<<state_point.grav<< endl;
+            }
 
             if(0) // If you need to see map point, change to "if(1)"
             {
@@ -1513,6 +1738,13 @@ private:
 
             pointSearchInd_surf.resize(feats_down_size);
             Nearest_Points.resize(feats_down_size);
+            for (auto &neighbors : Nearest_Points)
+            {
+                if (neighbors.capacity() < static_cast<size_t>(NUM_MATCH_POINTS))
+                {
+                    neighbors.reserve(NUM_MATCH_POINTS);
+                }
+            }
             int  rematch_num = 0;
             bool nearest_search_en = true; //
 
@@ -1577,6 +1809,30 @@ private:
                 double lidar_scan_dt = Measures.lidar_end_time - Measures.lidar_beg_time;
                 double imu_span_dt = 0.0;
                 double last_curvature_ms = 0.0;
+                const double stage_total = stage_downsample_time + stage_transform_time + stage_knn_time + stage_map_add_time;
+                double dominant_stage_ratio = 0.0;
+                const char *dominant_stage = "none";
+                if (stage_total > 1e-9)
+                {
+                    dominant_stage = "downsample";
+                    double dominant_time = stage_downsample_time;
+                    if (stage_transform_time > dominant_time)
+                    {
+                        dominant_stage = "transform";
+                        dominant_time = stage_transform_time;
+                    }
+                    if (stage_knn_time > dominant_time)
+                    {
+                        dominant_stage = "kNN";
+                        dominant_time = stage_knn_time;
+                    }
+                    if (stage_map_add_time > dominant_time)
+                    {
+                        dominant_stage = "map_add";
+                        dominant_time = stage_map_add_time;
+                    }
+                    dominant_stage_ratio = dominant_time / stage_total;
+                }
                 double ba_norm = std::sqrt(
                     state_point.ba(0) * state_point.ba(0) +
                     state_point.ba(1) * state_point.ba(1) +
@@ -1602,7 +1858,7 @@ private:
                 }
 
                 RCLCPP_INFO(this->get_logger(),
-                            "[trace] t:%.3f scan_dt:%.4f tail_curv_ms:%.3f imu[n:%d dt:%.4f] pos:[%.3f %.3f %.3f] vel:[%.3f %.3f %.3f] bgz:%+.4f ba:[%.4f %.4f %.4f|n:%.4f] imu_acc:[%.3f %.3f %.3f] yaw_rate(est/meas/err):%.4f/%.4f/%+.4f gz_mean:%+.4f contrib imu[dpos:%.4f dvel:%.4f] pressure[msg:%d used:%d ref_wait:%d init:%d last(z/p/e):%.3f/%.3f/%+.3f innov|e|[mean:%.3f max:%.3f] dstate[dpos:%.4f dvel:%.4f] signed[dz(sum/mean/last):%+.4f/%+.4f/%+.4f dbp(sum/mean/last):%+.5f/%+.5f/%+.5f]] lidar[dpos:%.4f dvel:%.4f] match[eff:%d/%d=%.2f res:%.4f]",
+                            "[trace] t:%.3f scan_dt:%.4f tail_curv_ms:%.3f imu[n:%d dt:%.4f] pos:[%.3f %.3f %.3f] vel:[%.3f %.3f %.3f] bgz:%+.4f ba:[%.4f %.4f %.4f|n:%.4f] imu_acc:[%.3f %.3f %.3f] yaw_rate(est/meas/err):%.4f/%.4f/%+.4f gz_mean:%+.4f contrib imu[dpos:%.4f dvel:%.4f] pressure[msg:%d used:%d ref_wait:%d init:%d last(z/p/e):%.3f/%.3f/%+.3f innov|e|[mean:%.3f max:%.3f] dstate[dpos:%.4f dvel:%.4f] signed[dz(sum/mean/last):%+.4f/%+.4f/%+.4f dbp(sum/mean/last):%+.5f/%+.5f/%+.5f]] lidar[dpos:%.4f dvel:%.4f] match[eff:%d/%d=%.2f res:%.4f] stage_ms[down:%.2f tf:%.2f knn:%.2f add:%.2f dom:%s %.0f%%]",
                             Measures.lidar_beg_time - first_lidar_time,
                             lidar_scan_dt,
                             last_curvature_ms,
@@ -1621,7 +1877,13 @@ private:
                             dz_pressure_signed_sum, dz_pressure_mean, dz_pressure_signed_last,
                             db_pressure_sum, db_pressure_mean, db_pressure_last,
                             dpos_lidar, dvel_lidar,
-                            effct_feat_num, feats_down_size, lidar_eff_ratio, res_mean_last);
+                            effct_feat_num, feats_down_size, lidar_eff_ratio, res_mean_last,
+                            stage_downsample_time * 1000.0,
+                            stage_transform_time * 1000.0,
+                            stage_knn_time * 1000.0,
+                            stage_map_add_time * 1000.0,
+                            dominant_stage,
+                            dominant_stage_ratio * 100.0);
             }
 
             /*** Debug variables ***/
@@ -1695,7 +1957,8 @@ private:
 
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_broadcaster_;
-    rclcpp::TimerBase::SharedPtr timer_;
+    std::thread processing_thread_;
+    std::atomic<bool> processing_worker_running_{false};
     rclcpp::TimerBase::SharedPtr map_pub_timer_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr map_save_srv_;
 
@@ -1714,7 +1977,7 @@ private:
     bool flg_EKF_converged, EKF_stop_flg = 0;
     double epsi[state_ikfom::DOF] = {0.001};
 
-    FILE *fp;
+    FILE *fp = nullptr;
     ofstream fout_pre, fout_out, fout_dbg;
 };
 
@@ -1726,7 +1989,9 @@ int main(int argc, char** argv)
 
 #ifdef FASTLIO_USE_CUDA
     auto node = std::make_shared<LaserMappingNode>();
-    rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 4);
+    const unsigned int hw_threads = std::max(1u, std::thread::hardware_concurrency());
+    const size_t executor_threads = std::min<size_t>(2, hw_threads);
+    rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), executor_threads);
     executor.add_node(node);
     executor.spin();
 #else
