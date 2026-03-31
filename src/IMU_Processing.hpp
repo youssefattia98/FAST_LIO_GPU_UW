@@ -49,6 +49,8 @@ class ImuProcess
   void set_acc_bias_cov(const V3D &b_a);
   void set_dynamics_trust(double trust);
   void set_thruster_meas(bool enable, const V3D &cov);
+  void set_dvl_params(double cov_floor_std, double min_speed);
+  void set_dvl_hold(bool enable, double max_age_sec);
   void set_process_noise(const V3D &nv, const V3D &nw, const V3D &nbg, const V3D &nba, const V3D &nb_dvl, double nb_pressure);
   Eigen::Matrix<double, process_noise_ikfom::DOF, process_noise_ikfom::DOF> Q;
   void Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, process_noise_ikfom::DOF, input_ikfom> &kf_state, PointCloudXYZI::Ptr pcl_un_);
@@ -69,6 +71,10 @@ class ImuProcess
   double dynamics_model_trust_ = 1.0;
   bool thruster_meas_en_ = false;
   V3D thruster_acc_cov_ = V3D(0.1, 0.1, 0.1);
+  double dvl_cov_floor_std_ = 0.01;
+  double dvl_min_speed_ = 0.0;
+  bool dvl_hold_enabled_ = false;
+  double dvl_hold_max_age_sec_ = 0.0;
   double first_lidar_time;
 
  private:
@@ -92,6 +98,12 @@ class ImuProcess
   int    init_iter_num = 1;
   bool   b_first_frame_ = true;
   bool   imu_need_init_ = true;
+  struct DvlHoldSample
+  {
+    bool valid = false;
+    double stamp = 0.0;
+    Eigen::Vector3d vel = Eigen::Vector3d::Zero();
+  } last_dvl_hold_sample_;
 };
 
 ImuProcess::ImuProcess()
@@ -132,6 +144,9 @@ void ImuProcess::Reset()
   IMUpose.clear();
   last_imu_.reset(new sensor_msgs::msg::Imu());
   cur_pcl_un_.reset(new PointCloudXYZI());
+  last_dvl_hold_sample_.valid = false;
+  last_dvl_hold_sample_.stamp = 0.0;
+  last_dvl_hold_sample_.vel.setZero();
 }
 
 void ImuProcess::set_extrinsic(const MD(4,4) &T)
@@ -192,6 +207,18 @@ void ImuProcess::set_thruster_meas(bool enable, const V3D &cov)
   thruster_meas_en_ = enable;
   thruster_acc_cov_ = cov;
   set_thruster_accel_noise_diag(Eigen::Vector3d(cov(0), cov(1), cov(2)));
+}
+
+void ImuProcess::set_dvl_params(double cov_floor_std, double min_speed)
+{
+  dvl_cov_floor_std_ = std::max(1e-6, cov_floor_std);
+  dvl_min_speed_ = std::max(0.0, min_speed);
+}
+
+void ImuProcess::set_dvl_hold(bool enable, double max_age_sec)
+{
+  dvl_hold_enabled_ = enable;
+  dvl_hold_max_age_sec_ = std::max(0.0, max_age_sec);
 }
 
 void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, process_noise_ikfom::DOF, input_ikfom> &kf_state, int &N)
@@ -295,6 +322,31 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
   size_t thr_idx = 0;
   Eigen::VectorXd thr_current;
   const bool dynamics_available = fastlio::dynamics::has_model();
+  struct DvlSample
+  {
+    double stamp = 0.0;
+    Eigen::Vector3d vel = Eigen::Vector3d::Zero();
+  };
+  std::vector<DvlSample> dvl_samples;
+  dvl_samples.reserve(meas.dvl.size());
+  for (const auto &dvl_msg : meas.dvl)
+  {
+    const auto &lin = dvl_msg->twist.twist.linear;
+    if (!std::isfinite(lin.x) || !std::isfinite(lin.y) || !std::isfinite(lin.z))
+    {
+      continue;
+    }
+
+    DvlSample sample;
+    sample.stamp = rclcpp::Time(dvl_msg->header.stamp).seconds();
+    sample.vel = Eigen::Vector3d(lin.x, lin.y, lin.z);
+    dvl_samples.push_back(std::move(sample));
+  }
+  size_t dvl_idx = 0;
+  while (dvl_idx < dvl_samples.size() && dvl_samples[dvl_idx].stamp <= last_lidar_end_time_)
+  {
+    ++dvl_idx;
+  }
 
   /*** Initialize IMU pose ***/
   state_ikfom imu_state = kf_state.get_x();
@@ -307,8 +359,27 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
   M3D R_imu;
 
   double dt = 0;
+  int dvl_updates_applied_this_scan = 0;
 
   input_ikfom in;
+  auto apply_dvl_update = [&](const DvlSample &sample)
+  {
+    if (dvl_min_speed_ > 0.0 && sample.vel.norm() < dvl_min_speed_)
+    {
+      return;
+    }
+
+    const double floor_var = dvl_cov_floor_std_ * dvl_cov_floor_std_;
+    Eigen::Matrix3d R_dvl = Eigen::Matrix3d::Zero();
+    R_dvl.diagonal() << floor_var, floor_var, floor_var;
+    set_dvl_cov(R_dvl);
+
+    double z_arr[3] = {sample.vel(0), sample.vel(1), sample.vel(2)};
+    vect3 z_dvl(z_arr, 3);
+    kf_state.update_iterated_dyn_runtime_share(z_dvl, h_dvl_share);
+    ++dvl_updates_applied_this_scan;
+  };
+
   for (auto it_imu = v_imu.begin(); it_imu < (v_imu.end() - 1); it_imu++)
   {
     auto &&head = *(it_imu);
@@ -330,65 +401,129 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
 
     acc_avr     = acc_avr * G_m_s2 / mean_acc.norm(); // - state_inout.ba;
 
-    if(head_stamp < last_lidar_end_time_)
+    const double seg_start = std::max(head_stamp, last_lidar_end_time_);
+    if (tail_stamp <= seg_start)
     {
-      dt = tail_stamp - last_lidar_end_time_;
-      // dt = tail->header.stamp.toSec() - pcl_beg_time;
+      continue;
     }
-    else
-    {
-      dt = tail_stamp - head_stamp;
-    }
-    
-    imu_state = kf_state.get_x();
-    while (thr_idx < thr_samples.size() && thr_samples[thr_idx].stamp <= head_stamp)
-    {
-      thr_current = thr_samples[thr_idx].forces;
-      ++thr_idx;
-    }
-    if (dynamics_available && thr_current.size() > 0)
-    {
-      fastlio::dynamics::set_thruster_forces(thr_current);
-    }
-    V3D omega_body = imu_state.omega;
-    V3D vel_body = imu_state.vel;
-    V3D vel_world = imu_state.rot * vel_body;
 
-    bool dyn_acc_valid = false;
     V3D specific_force_dyn = acc_avr;
-    if (dynamics_available)
+    bool dyn_acc_valid = false;
+    double current_stamp = seg_start;
+    while (dvl_idx < dvl_samples.size() && dvl_samples[dvl_idx].stamp <= tail_stamp)
     {
-      Eigen::Matrix<double, 6, 1> vel_body6;
-      vel_body6 << vel_body(0), vel_body(1), vel_body(2), omega_body(0), omega_body(1), omega_body(2);
-
-      vect3 euler_deg = SO3ToEuler(imu_state.rot);
-      Eigen::Vector3d euler_rad = Eigen::Vector3d(euler_deg[0], euler_deg[1], euler_deg[2]) * (PI_M / 180.0);
-      Eigen::Matrix<double, 6, 1> pose_world6;
-      pose_world6 << imu_state.pos(0), imu_state.pos(1), imu_state.pos(2), euler_rad(0), euler_rad(1), euler_rad(2);
-
-      Eigen::Matrix<double, 6, 1> accel_body6;
-      if (fastlio::dynamics::compute_body_accel(vel_body6, pose_world6, accel_body6))
+      const double target_stamp = dvl_samples[dvl_idx].stamp;
+      if (target_stamp > current_stamp)
       {
-        V3D grav_world(imu_state.grav[0], imu_state.grav[1], imu_state.grav[2]);
-        V3D grav_body = imu_state.rot.conjugate() * grav_world;
-        V3D acc_body_lin(accel_body6(0), accel_body6(1), accel_body6(2));
-        specific_force_dyn = acc_body_lin + omega_body.cross(vel_body) - grav_body;
-        in.acc = specific_force_dyn + imu_state.ba;
-        dyn_acc_valid = true;
+        imu_state = kf_state.get_x();
+        while (thr_idx < thr_samples.size() && thr_samples[thr_idx].stamp <= current_stamp)
+        {
+          thr_current = thr_samples[thr_idx].forces;
+          ++thr_idx;
+        }
+        if (dynamics_available && thr_current.size() > 0)
+        {
+          fastlio::dynamics::set_thruster_forces(thr_current);
+        }
+        V3D omega_body = imu_state.omega;
+        V3D vel_body = imu_state.vel;
+        dyn_acc_valid = false;
+        specific_force_dyn = acc_avr;
+        if (dynamics_available)
+        {
+          Eigen::Matrix<double, 6, 1> vel_body6;
+          vel_body6 << vel_body(0), vel_body(1), vel_body(2), omega_body(0), omega_body(1), omega_body(2);
+
+          vect3 euler_deg = SO3ToEuler(imu_state.rot);
+          Eigen::Vector3d euler_rad = Eigen::Vector3d(euler_deg[0], euler_deg[1], euler_deg[2]) * (PI_M / 180.0);
+          Eigen::Matrix<double, 6, 1> pose_world6;
+          pose_world6 << imu_state.pos(0), imu_state.pos(1), imu_state.pos(2), euler_rad(0), euler_rad(1), euler_rad(2);
+
+          Eigen::Matrix<double, 6, 1> accel_body6;
+          if (fastlio::dynamics::compute_body_accel(vel_body6, pose_world6, accel_body6))
+          {
+            V3D grav_world(imu_state.grav[0], imu_state.grav[1], imu_state.grav[2]);
+            V3D grav_body = imu_state.rot.conjugate() * grav_world;
+            V3D acc_body_lin(accel_body6(0), accel_body6(1), accel_body6(2));
+            specific_force_dyn = acc_body_lin + omega_body.cross(vel_body) - grav_body;
+            in.acc = specific_force_dyn + imu_state.ba;
+            dyn_acc_valid = true;
+          }
+        }
+        if (!dyn_acc_valid)
+        {
+          in.acc = acc_avr;
+        }
+        in.gyro = angvel_avr;
+        Q.block<3, 3>(0, 0).diagonal() = cov_proc_nv;
+        Q.block<3, 3>(3, 3).diagonal() = cov_proc_nw;
+        Q.block<3, 3>(6, 6).diagonal() = cov_proc_nbg;
+        Q.block<3, 3>(9, 9).diagonal() = cov_proc_nba;
+        Q.block<3, 3>(12, 12).diagonal() = cov_proc_nb_dvl;
+        Q(15, 15) = cov_proc_nb_pressure;
+        dt = target_stamp - current_stamp;
+        kf_state.predict(dt, Q, in);
+        current_stamp = target_stamp;
       }
+      apply_dvl_update(dvl_samples[dvl_idx]);
+      last_dvl_hold_sample_.valid = true;
+      last_dvl_hold_sample_.stamp = dvl_samples[dvl_idx].stamp;
+      last_dvl_hold_sample_.vel = dvl_samples[dvl_idx].vel;
+      ++dvl_idx;
     }
-    if (!dyn_acc_valid)
+
+    dt = tail_stamp - current_stamp;
+    if (dt > 0.0)
     {
-      in.acc = acc_avr;
+      imu_state = kf_state.get_x();
+      while (thr_idx < thr_samples.size() && thr_samples[thr_idx].stamp <= current_stamp)
+      {
+        thr_current = thr_samples[thr_idx].forces;
+        ++thr_idx;
+      }
+      if (dynamics_available && thr_current.size() > 0)
+      {
+        fastlio::dynamics::set_thruster_forces(thr_current);
+      }
+      V3D omega_body = imu_state.omega;
+      V3D vel_body = imu_state.vel;
+
+      dyn_acc_valid = false;
+      specific_force_dyn = acc_avr;
+      if (dynamics_available)
+      {
+        Eigen::Matrix<double, 6, 1> vel_body6;
+        vel_body6 << vel_body(0), vel_body(1), vel_body(2), omega_body(0), omega_body(1), omega_body(2);
+
+        vect3 euler_deg = SO3ToEuler(imu_state.rot);
+        Eigen::Vector3d euler_rad = Eigen::Vector3d(euler_deg[0], euler_deg[1], euler_deg[2]) * (PI_M / 180.0);
+        Eigen::Matrix<double, 6, 1> pose_world6;
+        pose_world6 << imu_state.pos(0), imu_state.pos(1), imu_state.pos(2), euler_rad(0), euler_rad(1), euler_rad(2);
+
+        Eigen::Matrix<double, 6, 1> accel_body6;
+        if (fastlio::dynamics::compute_body_accel(vel_body6, pose_world6, accel_body6))
+        {
+          V3D grav_world(imu_state.grav[0], imu_state.grav[1], imu_state.grav[2]);
+          V3D grav_body = imu_state.rot.conjugate() * grav_world;
+          V3D acc_body_lin(accel_body6(0), accel_body6(1), accel_body6(2));
+          specific_force_dyn = acc_body_lin + omega_body.cross(vel_body) - grav_body;
+          in.acc = specific_force_dyn + imu_state.ba;
+          dyn_acc_valid = true;
+        }
+      }
+      if (!dyn_acc_valid)
+      {
+        in.acc = acc_avr;
+      }
+      in.gyro = angvel_avr;
+      Q.block<3, 3>(0, 0).diagonal() = cov_proc_nv;
+      Q.block<3, 3>(3, 3).diagonal() = cov_proc_nw;
+      Q.block<3, 3>(6, 6).diagonal() = cov_proc_nbg;
+      Q.block<3, 3>(9, 9).diagonal() = cov_proc_nba;
+      Q.block<3, 3>(12, 12).diagonal() = cov_proc_nb_dvl;
+      Q(15, 15) = cov_proc_nb_pressure;
+      kf_state.predict(dt, Q, in);
     }
-    in.gyro = angvel_avr;
-    Q.block<3, 3>(0, 0).diagonal() = cov_proc_nv;
-    Q.block<3, 3>(3, 3).diagonal() = cov_proc_nw;
-    Q.block<3, 3>(6, 6).diagonal() = cov_proc_nbg;
-    Q.block<3, 3>(9, 9).diagonal() = cov_proc_nba;
-    Q.block<3, 3>(12, 12).diagonal() = cov_proc_nb_dvl;
-    Q(15, 15) = cov_proc_nb_pressure;
-    kf_state.predict(dt, Q, in);
 
     double lambda_dyn = fastlio::dynamics::has_model() ? std::max(0.01, dynamics_model_trust_) : 1.0;
     set_imu_accel_noise_diag(Eigen::Vector3d(cov_acc(0), cov_acc(1), cov_acc(2)) * lambda_dyn);
@@ -421,8 +556,47 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
 
   /*** calculated the pos and attitude prediction at the frame-end ***/
   double note = pcl_end_time > imu_end_time ? 1.0 : -1.0;
-  dt = note * (pcl_end_time - imu_end_time);
-  kf_state.predict(dt, Q, in);
+  double current_tail_time = imu_end_time;
+  while (dvl_idx < dvl_samples.size() && dvl_samples[dvl_idx].stamp <= pcl_end_time)
+  {
+    const double target_stamp = dvl_samples[dvl_idx].stamp;
+    if (target_stamp > current_tail_time)
+    {
+      dt = target_stamp - current_tail_time;
+      kf_state.predict(dt, Q, in);
+      current_tail_time = target_stamp;
+    }
+    apply_dvl_update(dvl_samples[dvl_idx]);
+    last_dvl_hold_sample_.valid = true;
+    last_dvl_hold_sample_.stamp = dvl_samples[dvl_idx].stamp;
+    last_dvl_hold_sample_.vel = dvl_samples[dvl_idx].vel;
+    ++dvl_idx;
+  }
+  if (dvl_hold_enabled_ &&
+      dvl_updates_applied_this_scan == 0 &&
+      last_dvl_hold_sample_.valid)
+  {
+    const double hold_age_sec = pcl_end_time - last_dvl_hold_sample_.stamp;
+    if (hold_age_sec >= 0.0 && hold_age_sec <= dvl_hold_max_age_sec_)
+    {
+      dt = pcl_end_time - current_tail_time;
+      if (std::abs(dt) > 0.0)
+      {
+        kf_state.predict(dt, Q, in);
+      }
+      current_tail_time = pcl_end_time;
+
+      DvlSample held_sample;
+      held_sample.stamp = last_dvl_hold_sample_.stamp;
+      held_sample.vel = last_dvl_hold_sample_.vel;
+      apply_dvl_update(held_sample);
+    }
+  }
+  dt = note * (pcl_end_time - current_tail_time);
+  if (std::abs(dt) > 0.0)
+  {
+    kf_state.predict(dt, Q, in);
+  }
   
   imu_state = kf_state.get_x();
   last_imu_ = meas.imu.back();
@@ -491,7 +665,6 @@ void ImuProcess::Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 
 
       cov_acc = cov_acc_scale;
       cov_gyr = cov_gyr_scale;
-      std::cout << "IMU Initial Done" << std::endl;
       // ROS_INFO("IMU Initial Done: Gravity: %.4f %.4f %.4f %.4f; state.bias_g: %.4f %.4f %.4f; acc covarience: %.8f %.8f %.8f; gry covarience: %.8f %.8f %.8f",\
       //          imu_state.grav[0], imu_state.grav[1], imu_state.grav[2], mean_acc.norm(), cov_bias_gyr[0], cov_bias_gyr[1], cov_bias_gyr[2], cov_acc[0], cov_acc[1], cov_acc[2], cov_gyr[0], cov_gyr[1], cov_gyr[2]);
       fout_imu.open(DEBUG_FILE_DIR("imu.txt"),ios::out);

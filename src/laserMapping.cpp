@@ -41,9 +41,12 @@
 #include <csignal>
 #include <chrono>
 #include <atomic>
+#include <sstream>
+#include <iomanip>
 #include <unistd.h>
 #include <stdexcept>
 #include <algorithm>
+#include <limits>
 #include <Python.h>
 #include <so3_math.h>
 #include <rclcpp/rclcpp.hpp>
@@ -93,8 +96,6 @@ double T1[MAXN], s_plot[MAXN], s_plot2[MAXN], s_plot3[MAXN], s_plot4[MAXN], s_pl
 double match_time = 0, solve_time = 0, solve_const_H_time = 0;
 int    kdtree_size_st = 0, kdtree_size_end = 0, add_point_size = 0, kdtree_delete_counter = 0;
 bool   runtime_pos_log = false, pcd_save_en = false, time_sync_en = false, extrinsic_est_en = true, path_en = true;
-bool   debug_metrics_en = false;
-int    debug_metrics_interval = 30;
 /**************************/
 
 float res_last[100000] = {0.0};
@@ -122,6 +123,7 @@ double last_timestamp_pressure = -1.0;
 double gyr_cov = 0.1, acc_cov = 0.1, b_gyr_cov = 0.0001, b_acc_cov = 0.0001;
 double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min = 0, fov_deg = 0;
 double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
+double last_sync_lidar_end_time = -std::numeric_limits<double>::infinity();
 int    effct_feat_num = 0, time_log_counter = 0, scan_count = 0, publish_count = 0;
 int    iterCount = 0, feats_down_size = 0, NUM_MAX_ITERATIONS = 0, laserCloudValidNum = 0, pcd_save_interval = -1, pcd_index = 0;
 bool   point_selected_surf[100000] = {0};
@@ -132,6 +134,8 @@ bool    is_first_lidar = true;
 bool    dvl_enabled = false;
 double  dvl_cov_floor_std = 0.01;
 double  dvl_min_speed = 0.0;
+bool    dvl_hold_enabled = false;
+double  dvl_hold_max_age_sec = 0.25;
 bool    pressure_enabled = false;
 double  pressure_cov_floor_std = 4.09;
 double  pressure_reference_pa = 101325.0;
@@ -342,6 +346,7 @@ void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::UniquePtr msg)
     {
         std::cerr << "lidar loop back, clear buffer" << std::endl;
         lidar_buffer.clear();
+        last_sync_lidar_end_time = -std::numeric_limits<double>::infinity();
     }
     if (is_first_lidar)
     {
@@ -372,6 +377,7 @@ void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::UniquePtr msg)
     {
         std::cerr << "lidar loop back, clear buffer" << std::endl;
         lidar_buffer.clear();
+        last_sync_lidar_end_time = -std::numeric_limits<double>::infinity();
     }
     if(is_first_lidar)
     {
@@ -531,6 +537,7 @@ bool sync_packages(MeasureGroup &meas)
         }
 
         meas.lidar_end_time = lidar_end_time;
+        meas.prev_lidar_end_time = last_sync_lidar_end_time;
 
         lidar_pushed = true;
     }
@@ -540,13 +547,21 @@ bool sync_packages(MeasureGroup &meas)
         return false;
     }
 
+    const double sensor_window_start = std::isfinite(meas.prev_lidar_end_time)
+        ? meas.prev_lidar_end_time
+        : -std::numeric_limits<double>::infinity();
+
     /*** push imu data, and pop from imu buffer ***/
-    double imu_time = get_time_sec(imu_buffer.front()->header.stamp);
     meas.imu.clear();
-    while ((!imu_buffer.empty()) && (imu_time < lidar_end_time))
+    while (!imu_buffer.empty())
     {
-        imu_time = get_time_sec(imu_buffer.front()->header.stamp);
-        if(imu_time > lidar_end_time) break;
+        const double imu_time = get_time_sec(imu_buffer.front()->header.stamp);
+        if (imu_time <= sensor_window_start)
+        {
+            imu_buffer.pop_front();
+            continue;
+        }
+        if (imu_time > lidar_end_time) break;
         meas.imu.push_back(imu_buffer.front());
         imu_buffer.pop_front();
     }
@@ -556,6 +571,11 @@ bool sync_packages(MeasureGroup &meas)
     while (!thruster_buffer.empty())
     {
         double thruster_time = get_time_sec(thruster_buffer.front()->header.stamp);
+        if (thruster_time <= sensor_window_start)
+        {
+            thruster_buffer.pop_front();
+            continue;
+        }
         if (thruster_time > lidar_end_time) break;
         meas.thruster_forces.push_back(thruster_buffer.front());
         thruster_buffer.pop_front();
@@ -566,6 +586,11 @@ bool sync_packages(MeasureGroup &meas)
     while (!dvl_buffer.empty())
     {
         double dvl_time = get_time_sec(dvl_buffer.front()->header.stamp);
+        if (dvl_time <= sensor_window_start)
+        {
+            dvl_buffer.pop_front();
+            continue;
+        }
         if (dvl_time > lidar_end_time) break;
         meas.dvl.push_back(dvl_buffer.front());
         dvl_buffer.pop_front();
@@ -576,6 +601,11 @@ bool sync_packages(MeasureGroup &meas)
     while (!pressure_buffer.empty())
     {
         double pressure_time = get_time_sec(pressure_buffer.front()->header.stamp);
+        if (pressure_time <= sensor_window_start)
+        {
+            pressure_buffer.pop_front();
+            continue;
+        }
         if (pressure_time > lidar_end_time) break;
         meas.pressure.push_back(pressure_buffer.front());
         pressure_buffer.pop_front();
@@ -584,6 +614,7 @@ bool sync_packages(MeasureGroup &meas)
     lidar_buffer.pop_front();
     time_buffer.pop_front();
     lidar_pushed = false;
+    last_sync_lidar_end_time = lidar_end_time;
     return true;
 }
 
@@ -595,8 +626,8 @@ void map_incremental()
     PointToAdd.reserve(feats_down_size);
     PointNoNeedDownsample.reserve(feats_down_size);
 
-#ifdef FASTLIO_USE_CUDA
     bool transformed_on_gpu = false;
+#ifdef FASTLIO_USE_CUDA
     if (gpu_point_transformer && gpu_point_transformer->available())
     {
         const double transform_start = omp_get_wtime();
@@ -970,8 +1001,8 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     corr_normvect->clear(); 
     total_residual = 0.0; 
 
-#ifdef FASTLIO_USE_CUDA
     bool transformed_on_gpu = false;
+#ifdef FASTLIO_USE_CUDA
     if (gpu_point_transformer && gpu_point_transformer->available())
     {
         const double transform_start = omp_get_wtime();
@@ -1179,6 +1210,8 @@ public:
         this->declare_parameter<vector<double>>("dvl.extrinsic_R", vector<double>());
         this->declare_parameter<double>("dvl.covariance_floor_std", 0.01);
         this->declare_parameter<double>("dvl.min_speed", 0.0);
+        this->declare_parameter<bool>("dvl.hold_last_measurement", false);
+        this->declare_parameter<double>("dvl.hold_max_age_sec", 0.25);
         this->declare_parameter<bool>("pressure.enable", false);
         this->declare_parameter<string>("pressure.topic", "/auv/pressure/scaled2");
         this->declare_parameter<vector<double>>("pressure.extrinsic_T", vector<double>());
@@ -1191,8 +1224,6 @@ public:
         this->declare_parameter<double>("dynamics.model_trust", 1.0);
         this->declare_parameter<bool>("dynamics.thruster_meas_en", false);
         this->declare_parameter<double>("dynamics.thruster_acc_cov", 0.1);
-        this->declare_parameter<bool>("debug_metrics_enable", false);
-        this->declare_parameter<int>("debug_metrics_interval", 30);
     this->declare_parameter<string>("frames.map_frame", map_frame_id);
     this->declare_parameter<string>("frames.odom_frame", odom_frame_id);
     this->declare_parameter<string>("frames.body_frame", body_frame_id);
@@ -1251,6 +1282,8 @@ public:
         this->get_parameter_or<vector<double>>("dvl.extrinsic_R", dvl_extrinR, vector<double>());
         this->get_parameter_or<double>("dvl.covariance_floor_std", dvl_cov_floor_std, 0.01);
         this->get_parameter_or<double>("dvl.min_speed", dvl_min_speed, 0.0);
+        this->get_parameter_or<bool>("dvl.hold_last_measurement", dvl_hold_enabled, false);
+        this->get_parameter_or<double>("dvl.hold_max_age_sec", dvl_hold_max_age_sec, 0.25);
         this->get_parameter_or<bool>("pressure.enable", pressure_enabled, false);
         this->get_parameter_or<string>("pressure.topic", pressure_topic, "/auv/pressure/scaled2");
         this->get_parameter_or<vector<double>>("pressure.extrinsic_T", pressure_extrinT, vector<double>());
@@ -1266,9 +1299,6 @@ public:
         this->get_parameter_or<string>("frames.map_frame", map_frame_id, map_frame_id);
         this->get_parameter_or<string>("frames.odom_frame", odom_frame_id, odom_frame_id);
         this->get_parameter_or<string>("frames.body_frame", body_frame_id, body_frame_id);
-        this->get_parameter_or<bool>("debug_metrics_enable", debug_metrics_en, false);
-        this->get_parameter_or<int>("debug_metrics_interval", debug_metrics_interval, 30);
-
     #ifdef MP_EN
         omp_set_num_threads(MP_PROC_NUM);
     #endif
@@ -1327,6 +1357,8 @@ public:
         p_imu->set_process_noise(V3D(proc_nv, proc_nv, proc_nv), V3D(proc_nw, proc_nw, proc_nw),
                      V3D(proc_nbg, proc_nbg, proc_nbg), V3D(proc_nba, proc_nba, proc_nba),
                      V3D(proc_nb_dvl, proc_nb_dvl, proc_nb_dvl), proc_nb_pressure);
+        p_imu->set_dvl_params(dvl_cov_floor_std, dvl_min_speed);
+        p_imu->set_dvl_hold(dvl_hold_enabled, dvl_hold_max_age_sec);
         p_imu->set_dynamics_trust(dynamics_model_trust_);
         p_imu->set_thruster_meas(thruster_meas_en_,
                                  V3D(thruster_acc_cov_, thruster_acc_cov_, thruster_acc_cov_));
@@ -1501,23 +1533,6 @@ private:
             }
 
             double t0,t1,t2,t3,t4,t5,match_start, solve_start, svd_time;
-            state_ikfom state_pre_imu = kf.get_x();
-            state_ikfom state_pre_lidar = state_pre_imu;
-            state_ikfom state_post_lidar = state_pre_imu;
-            int pressure_msgs_total = 0;
-            int pressure_updates_used = 0;
-            int pressure_ref_wait_count = 0;
-            double pressure_innov_abs_sum = 0.0;
-            double pressure_innov_abs_max = 0.0;
-            double pressure_depth_last = 0.0;
-            double pressure_pred_last = 0.0;
-            double dpos_pressure = 0.0;
-            double dvel_pressure = 0.0;
-            double dz_pressure_signed_sum = 0.0;
-            double dz_pressure_signed_last = 0.0;
-            double db_pressure_sum = 0.0;
-            double db_pressure_last = 0.0;
-            bool pressure_has_update = false;
 
             match_time = 0;
             kdtree_search_time = 0.0;
@@ -1534,47 +1549,10 @@ private:
 
             p_imu->Process(Measures, kf, feats_undistort);
 
-            if (dvl_enabled && !Measures.dvl.empty())
-            {
-                for (const auto &dvl_msg : Measures.dvl)
-                {
-                    const auto &lin = dvl_msg->twist.twist.linear;
-                    if (!std::isfinite(lin.x) || !std::isfinite(lin.y) || !std::isfinite(lin.z))
-                    {
-                        continue;
-                    }
-
-                    Eigen::Vector3d z_meas(lin.x, lin.y, lin.z);
-                    if (dvl_min_speed > 0.0 && z_meas.norm() < dvl_min_speed)
-                    {
-                        continue;
-                    }
-
-                    double floor_var = dvl_cov_floor_std * dvl_cov_floor_std;
-                    double var_x = floor_var;
-                    double var_y = floor_var;
-                    double var_z = floor_var;
-
-                    Eigen::Matrix3d R_dvl = Eigen::Matrix3d::Zero();
-                    R_dvl(0, 0) = var_x;
-                    R_dvl(1, 1) = var_y;
-                    R_dvl(2, 2) = var_z;
-                    set_dvl_cov(R_dvl);
-
-                    double z_arr[3] = {z_meas(0), z_meas(1), z_meas(2)};
-                    vect3 z_dvl(z_arr, 3);
-                    kf.update_iterated_dyn_runtime_share(z_dvl, h_dvl_share);
-                }
-            }
-
             if (pressure_enabled && !Measures.pressure.empty())
             {
                 for (const auto &pressure_msg : Measures.pressure)
                 {
-                    if (debug_metrics_en)
-                    {
-                        ++pressure_msgs_total;
-                    }
                     const double p_abs = pressure_msg->fluid_pressure;
                     if (!std::isfinite(p_abs))
                     {
@@ -1585,10 +1563,6 @@ private:
                     {
                         pressure_ref_sum += p_abs;
                         pressure_ref_count++;
-                        if (debug_metrics_en)
-                        {
-                            ++pressure_ref_wait_count;
-                        }
                         if (pressure_ref_count >= kPressureRefInitSamples)
                         {
                             pressure_reference_pa = pressure_ref_sum / static_cast<double>(pressure_ref_count);
@@ -1609,50 +1583,20 @@ private:
                         continue;
                     }
 
-                    const double depth_pred = pressure_meas_predict(state_pre_pressure);
-                    if (debug_metrics_en)
-                    {
-                        const double abs_innov = std::abs(depth - depth_pred);
-                        pressure_innov_abs_sum += abs_innov;
-                        pressure_innov_abs_max = std::max(pressure_innov_abs_max, abs_innov);
-                    }
-
                     set_pressure_cov(pressure_cov_floor_std * pressure_cov_floor_std);
 
                     double z_arr[1] = {depth};
                     vect1 z_pressure(z_arr, 1);
                     kf.update_iterated_dyn_runtime_share(z_pressure, h_pressure_share);
-
-                    if (debug_metrics_en)
-                    {
-                        const state_ikfom state_post_pressure = kf.get_x();
-                        dpos_pressure += (state_post_pressure.pos - state_pre_pressure.pos).norm();
-                        dvel_pressure += (state_post_pressure.vel - state_pre_pressure.vel).norm();
-                        const double dz_pressure = state_post_pressure.pos(2) - state_pre_pressure.pos(2);
-                        const double db_pressure = state_post_pressure.b_pressure[0] - state_pre_pressure.b_pressure[0];
-                        dz_pressure_signed_sum += dz_pressure;
-                        db_pressure_sum += db_pressure;
-                        dz_pressure_signed_last = dz_pressure;
-                        db_pressure_last = db_pressure;
-                    }
-                    pressure_depth_last = depth;
-                    pressure_pred_last = depth_pred;
-                    if (debug_metrics_en)
-                    {
-                        pressure_has_update = true;
-                        ++pressure_updates_used;
-                    }
                 }
             }
-
-            state_pre_lidar = kf.get_x();
 
             state_point = kf.get_x();
             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
 
             if (feats_undistort->empty() || (feats_undistort == NULL))
             {
-                RCLCPP_WARN(this->get_logger(), "No point, skip this scan!\n");
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000, "No point, skip this scan!");
                 return;
             }
 
@@ -1714,7 +1658,7 @@ private:
             /*** ICP and iterated Kalman filter update ***/
             if (feats_down_size < 5)
             {
-                RCLCPP_WARN(this->get_logger(), "No point, skip this scan!\n");
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000, "No point, skip this scan!");
                 return;
             }
             
@@ -1755,7 +1699,6 @@ private:
             double solve_H_time = 0;
             kf.update_iterated_dyn_share_modified(LASER_POINT_COV, solve_H_time);
             state_point = kf.get_x();
-            state_post_lidar = state_point;
             euler_cur = SO3ToEuler(state_point.rot);
             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
             geoQuat.x = state_point.rot.coeffs()[0];
@@ -1779,112 +1722,6 @@ private:
             if (scan_pub_en && scan_body_pub_en) publish_frame_body(pubLaserCloudFull_body_);
             if (effect_pub_en) publish_effect_world(pubLaserCloudEffect_);
             // if (map_pub_en) publish_map(pubLaserCloudMap_);
-
-            // Compact drift trace for stationary tuning runs.
-            static int debug_frame_count = 0;
-            ++debug_frame_count;
-            if (debug_metrics_en && debug_metrics_interval > 0 && (debug_frame_count % debug_metrics_interval) == 0)
-            {
-                double imu_ax = 0.0, imu_ay = 0.0, imu_az = 0.0;
-                double imu_gz = 0.0;
-                double imu_gz_mean = 0.0;
-                int imu_samples = static_cast<int>(Measures.imu.size());
-                double omega_z = state_point.omega[2];
-                double gyro_pred_z = omega_z + state_point.bg(2);
-
-                double dpos_imu = (state_pre_lidar.pos - state_pre_imu.pos).norm();
-                double dvel_imu = (state_pre_lidar.vel - state_pre_imu.vel).norm();
-
-                double dpos_lidar = (state_post_lidar.pos - state_pre_lidar.pos).norm();
-                double dvel_lidar = (state_post_lidar.vel - state_pre_lidar.vel).norm();
-                double pressure_innov_abs_mean = (pressure_updates_used > 0) ?
-                    (pressure_innov_abs_sum / static_cast<double>(pressure_updates_used)) : 0.0;
-                double pressure_last_innov = pressure_has_update ? (pressure_depth_last - pressure_pred_last) : 0.0;
-                double dz_pressure_mean = (pressure_updates_used > 0) ?
-                    (dz_pressure_signed_sum / static_cast<double>(pressure_updates_used)) : 0.0;
-                double db_pressure_mean = (pressure_updates_used > 0) ?
-                    (db_pressure_sum / static_cast<double>(pressure_updates_used)) : 0.0;
-
-                double lidar_eff_ratio = (feats_down_size > 0) ? static_cast<double>(effct_feat_num) / static_cast<double>(feats_down_size) : 0.0;
-                double lidar_scan_dt = Measures.lidar_end_time - Measures.lidar_beg_time;
-                double imu_span_dt = 0.0;
-                double last_curvature_ms = 0.0;
-                const double stage_total = stage_downsample_time + stage_transform_time + stage_knn_time + stage_map_add_time;
-                double dominant_stage_ratio = 0.0;
-                const char *dominant_stage = "none";
-                if (stage_total > 1e-9)
-                {
-                    dominant_stage = "downsample";
-                    double dominant_time = stage_downsample_time;
-                    if (stage_transform_time > dominant_time)
-                    {
-                        dominant_stage = "transform";
-                        dominant_time = stage_transform_time;
-                    }
-                    if (stage_knn_time > dominant_time)
-                    {
-                        dominant_stage = "kNN";
-                        dominant_time = stage_knn_time;
-                    }
-                    if (stage_map_add_time > dominant_time)
-                    {
-                        dominant_stage = "map_add";
-                        dominant_time = stage_map_add_time;
-                    }
-                    dominant_stage_ratio = dominant_time / stage_total;
-                }
-                double ba_norm = std::sqrt(
-                    state_point.ba(0) * state_point.ba(0) +
-                    state_point.ba(1) * state_point.ba(1) +
-                    state_point.ba(2) * state_point.ba(2));
-                if (Measures.lidar && !Measures.lidar->points.empty())
-                {
-                    last_curvature_ms = Measures.lidar->points.back().curvature;
-                }
-                if (!Measures.imu.empty())
-                {
-                    double gz_sum = 0.0;
-                    for (const auto &imu_msg : Measures.imu)
-                    {
-                        gz_sum += imu_msg->angular_velocity.z;
-                    }
-                    imu_gz_mean = gz_sum / static_cast<double>(Measures.imu.size());
-                    const auto &imu_msg = Measures.imu.back();
-                    imu_ax = imu_msg->linear_acceleration.x;
-                    imu_ay = imu_msg->linear_acceleration.y;
-                    imu_az = imu_msg->linear_acceleration.z;
-                    imu_gz = imu_msg->angular_velocity.z;
-                    imu_span_dt = get_time_sec(Measures.imu.back()->header.stamp) - get_time_sec(Measures.imu.front()->header.stamp);
-                }
-
-                RCLCPP_INFO(this->get_logger(),
-                            "[trace] t:%.3f scan_dt:%.4f tail_curv_ms:%.3f imu[n:%d dt:%.4f] pos:[%.3f %.3f %.3f] vel:[%.3f %.3f %.3f] bgz:%+.4f ba:[%.4f %.4f %.4f|n:%.4f] imu_acc:[%.3f %.3f %.3f] yaw_rate(est/meas/err):%.4f/%.4f/%+.4f gz_mean:%+.4f contrib imu[dpos:%.4f dvel:%.4f] pressure[msg:%d used:%d ref_wait:%d init:%d last(z/p/e):%.3f/%.3f/%+.3f innov|e|[mean:%.3f max:%.3f] dstate[dpos:%.4f dvel:%.4f] signed[dz(sum/mean/last):%+.4f/%+.4f/%+.4f dbp(sum/mean/last):%+.5f/%+.5f/%+.5f]] lidar[dpos:%.4f dvel:%.4f] match[eff:%d/%d=%.2f res:%.4f] stage_ms[down:%.2f tf:%.2f knn:%.2f add:%.2f dom:%s %.0f%%]",
-                            Measures.lidar_beg_time - first_lidar_time,
-                            lidar_scan_dt,
-                            last_curvature_ms,
-                            imu_samples,
-                            imu_span_dt,
-                            state_point.pos(0), state_point.pos(1), state_point.pos(2),
-                            state_point.vel(0), state_point.vel(1), state_point.vel(2),
-                            state_point.bg(2),
-                            state_point.ba(0), state_point.ba(1), state_point.ba(2), ba_norm,
-                            imu_ax, imu_ay, imu_az,
-                            gyro_pred_z, imu_gz, gyro_pred_z - imu_gz, imu_gz_mean,
-                            dpos_imu, dvel_imu,
-                            pressure_msgs_total, pressure_updates_used, pressure_ref_wait_count, pressure_ref_initialized ? 1 : 0,
-                            pressure_depth_last, pressure_pred_last, pressure_last_innov,
-                            pressure_innov_abs_mean, pressure_innov_abs_max, dpos_pressure, dvel_pressure,
-                            dz_pressure_signed_sum, dz_pressure_mean, dz_pressure_signed_last,
-                            db_pressure_sum, db_pressure_mean, db_pressure_last,
-                            dpos_lidar, dvel_lidar,
-                            effct_feat_num, feats_down_size, lidar_eff_ratio, res_mean_last,
-                            stage_downsample_time * 1000.0,
-                            stage_transform_time * 1000.0,
-                            stage_knn_time * 1000.0,
-                            stage_map_add_time * 1000.0,
-                            dominant_stage,
-                            dominant_stage_ratio * 100.0);
-            }
 
             /*** Debug variables ***/
             if (runtime_pos_log)

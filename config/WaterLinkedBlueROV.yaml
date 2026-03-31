@@ -8,8 +8,8 @@
         cube_side_length: 5.0
         runtime_pos_log_enable: false # true writes pose log to disk; false disables logging
         common:
-            lid_topic:  "/sonar_point_cloud"
-            imu_topic:  "/auv/imu/data_raw"
+            lid_topic:  "/IsaacSim/rtx_lidar/point_cloud"
+            imu_topic:  "/IsaacSim/imu"
             time_sync_en: true        # ONLY turn on when external time synchronization is really not possible
             time_offset_lidar_to_imu: 0.0 # Time offset between lidar and IMU calibrated by other algorithms, e.g. LI-Init (can be found in README).
                                         # This param will take effect no matter what time_sync_en is. So if the time offset is not known exactly, please set as 0.0
@@ -17,8 +17,8 @@
         preprocess:
             lidar_type: 5                # 1: Livox, 2: Velodyne, 3: Ouster, 4: Mid360, 5: WaterLinked solid-state
             scan_line: 32                # number of scan lines of the LiDAR 
-            blind: 0.2
-            scan_rate: 5        
+            blind: 2.0
+            scan_rate: 100        
 
 
         mapping:
@@ -48,29 +48,27 @@
             enable: false
             config_name: "BlueROV"  # model name used by the dynamics model internals
             config_path: "/home/jetson/bluerov_ws/src/FAST_LIO_GPU_UW/config/BlueROV.conf"  # full path to libconfig .conf file
-            forces_topic: "/auv/forces_desired"
+            forces_topic: "/auv/forces_dedired"
             model_trust: 1.0 # 1.0 = fully trust dynamics, 0.0 = ignore dynamics
-            thruster_meas_en: false   # use dynamics-based pseudo-accel as a measurement update
+            thruster_meas_en: true    # use dynamics-based pseudo-accel as a measurement update
             thruster_acc_cov: 1.0     # covariance for thruster-accel pseudo-measurement (m/s^2)^2
 
         dvl:
-            enable: true   
-            topic: "/auv/dvl"
+            enable: true
+            topic: "/IsaacSim/dvl/odom"
             extrinsic_T: [ -0.079, -0.09691, -0.25938 ] # DVL_T_wrt_IMU in meters; from CAD model, but can be refined by extrinsic estimation if enabled
             extrinsic_R: [ 1., 0., 0.,
                         0., 1., 0.,
                         0., 0., 1.]
-            covariance_floor_std: 0.05
+            covariance_floor_std: 1.0
             min_speed: 0.0
-            hold_last_measurement: true
-            hold_max_age_sec: 0.25
 
         pressure:
             enable: true
-            topic: "/auv/pressure/scaled2"
+            topic: "/IsaacSim/barometer"
             extrinsic_T: [ -0.24219, -0.03954, 0.01898] # pressure sensor position wrt IMU frame [m]
             covariance_floor_std: 0.1
-            reference_pressure_pa: 103850.0
+            reference_pressure_pa: 101325.0
 
         frames:
             map_frame: "World"
@@ -84,7 +82,6 @@
             scan_bodyframe_pub_en: false  # true: output the point cloud scans in IMU-body-frame
             blind_max: 15.0               # max range [m] for published registered clouds; <=0 disables max cutoff
             map_en: true                # enable map accumulation so /map_save writes a populated PCD
-            imu_driven_propagation: true # publish /Odometry at IMU rate when no LiDAR scans are available
 
         map_file_path: "/home/attia/bags/fastlio_map.pcd"
         pcd_save:
