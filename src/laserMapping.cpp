@@ -47,12 +47,14 @@
 #include <stdexcept>
 #include <algorithm>
 #include <limits>
+#include <array>
 #include <Python.h>
 #include <so3_math.h>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp/executors/multi_threaded_executor.hpp>
 #include <libconfig.h++>
 #include <Eigen/Core>
+#include <Eigen/Eigenvalues>
 #include "IMU_Processing.hpp"
 #include "dynamics_bridge.hpp"
 #include "underwater_vehicle_model.hpp"
@@ -561,7 +563,10 @@ bool sync_packages(MeasureGroup &meas)
             imu_buffer.pop_front();
             continue;
         }
-        if (imu_time > lidar_end_time) break;
+        if (imu_time > lidar_end_time)
+        {
+            break;
+        }
         meas.imu.push_back(imu_buffer.front());
         imu_buffer.pop_front();
     }
@@ -576,7 +581,10 @@ bool sync_packages(MeasureGroup &meas)
             thruster_buffer.pop_front();
             continue;
         }
-        if (thruster_time > lidar_end_time) break;
+        if (thruster_time > lidar_end_time)
+        {
+            break;
+        }
         meas.thruster_forces.push_back(thruster_buffer.front());
         thruster_buffer.pop_front();
     }
@@ -591,7 +599,10 @@ bool sync_packages(MeasureGroup &meas)
             dvl_buffer.pop_front();
             continue;
         }
-        if (dvl_time > lidar_end_time) break;
+        if (dvl_time > lidar_end_time)
+        {
+            break;
+        }
         meas.dvl.push_back(dvl_buffer.front());
         dvl_buffer.pop_front();
     }
@@ -606,7 +617,10 @@ bool sync_packages(MeasureGroup &meas)
             pressure_buffer.pop_front();
             continue;
         }
-        if (pressure_time > lidar_end_time) break;
+        if (pressure_time > lidar_end_time)
+        {
+            break;
+        }
         meas.pressure.push_back(pressure_buffer.front());
         pressure_buffer.pop_front();
     }
@@ -1154,6 +1168,7 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
         /*** Measuremnt: distance to the closest surface/corner ***/
         ekfom_data.h(i) = -norm_p.intensity;
     }
+
     solve_time += omp_get_wtime() - solve_start_;
 }
 
@@ -1450,7 +1465,7 @@ public:
         sub_thrusters_ = this->create_subscription<sensor_msgs::msg::JointState>(dynamics_forces_topic_, 50, thruster_cbk);
         if (dvl_enabled)
         {
-            sub_dvl_ = this->create_subscription<geometry_msgs::msg::TwistWithCovarianceStamped>(dvl_topic, 50, dvl_cbk);
+            sub_dvl_ = this->create_subscription<geometry_msgs::msg::TwistWithCovarianceStamped>(dvl_topic, rclcpp::SensorDataQoS(), dvl_cbk);
         }
         if (pressure_enabled)
         {
@@ -1504,7 +1519,6 @@ public:
         if (fp != nullptr) fclose(fp);
     }
 
-private:
     void processing_worker_loop()
     {
         while (processing_worker_running_.load(std::memory_order_acquire) && rclcpp::ok() && !flg_exit)
@@ -1532,13 +1546,12 @@ private:
                 return;
             }
 
-            double t0,t1,t2,t3,t4,t5,match_start, solve_start, svd_time;
+            double t0,t1,t2,t3,t5;
 
             match_time = 0;
             kdtree_search_time = 0.0;
             solve_time = 0;
             solve_const_H_time = 0;
-            svd_time   = 0;
             t0 = omp_get_wtime();
             stage_downsample_time = 0.0;
             stage_transform_time = 0.0;

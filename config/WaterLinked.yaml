@@ -17,8 +17,7 @@
         preprocess:
             lidar_type: 5                # 1: Livox, 2: Velodyne, 3: Ouster, 4: Mid360, 5: WaterLinked solid-state
             scan_line: 32                # number of scan lines of the LiDAR 
-            blind: 0.2
-            scan_rate: 5        
+            blind: 0.2    
 
 
         mapping:
@@ -45,7 +44,7 @@
                 nb_pressure: 0.0001 # pressure-depth bias random-walk (m^2/s)
 
         dynamics:
-            enable: false
+            enable: true
             config_name: "BlueROV"  # model name used by the dynamics model internals
             config_path: "/home/jetson/bluerov_ws/src/FAST_LIO_GPU_UW/config/BlueROV.conf"  # full path to libconfig .conf file
             forces_topic: "/auv/forces_desired"
