@@ -57,6 +57,13 @@ def generate_launch_description():
             '--log-level', 'fast_lio.gpu:=debug'
         ]
     )
+    loop_closure_backend_node = Node(
+        package='fast_lio',
+        executable='loop_closure_backend_node',
+        parameters=[PathJoinSubstitution([config_path, config_file]),
+                    {'use_sim_time': use_sim_time}],
+        output='screen'
+    )
     rviz_node = Node(
         package='rviz2',
         executable='rviz2',
@@ -83,6 +90,7 @@ def generate_launch_description():
     ld.add_action(declare_rviz_config_path_cmd)
 
     ld.add_action(fast_lio_node)
+    ld.add_action(loop_closure_backend_node)
     # ld.add_action(fastlio_path_node)
     ld.add_action(rviz_node)
 

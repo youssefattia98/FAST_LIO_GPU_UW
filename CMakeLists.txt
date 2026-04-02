@@ -70,6 +70,7 @@ find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(visualization_msgs REQUIRED)
+find_package(tf2_ros REQUIRED)
 find_package(auv_core_helper REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(PkgConfig REQUIRED)
@@ -77,6 +78,7 @@ pkg_check_modules(LIBCONFIGPP REQUIRED libconfig++)
 find_library(UNDERWATER_VEHICLE_MODEL NAMES underwater_vehicle_model REQUIRED)
 find_package(pcl_ros REQUIRED)
 find_package(pcl_conversions REQUIRED)
+find_package(GTSAM REQUIRED QUIET)
 option(FASTLIO_REQUIRE_LIVOX "Fail configuration if livox_ros_driver2 is missing" OFF)
 find_package(livox_ros_driver2 QUIET)
 find_package(rosidl_default_generators REQUIRED)
@@ -109,17 +111,20 @@ endif()
 
 # Thirdparty libraries
 find_package(Eigen3 REQUIRED)
-find_package(PCL REQUIRED COMPONENTS common io)
+find_package(PCL REQUIRED COMPONENTS common io filters kdtree registration)
 
 message(Eigen: ${EIGEN3_INCLUDE_DIR})
 message(STATUS "PCL: ${PCL_INCLUDE_DIRS}")
 
 set(msg_files
   "msg/Pose6D.msg"
+  "msg/FrontendFrame.msg"
+  "msg/OptimizedKeyframes.msg"
 )
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   ${msg_files}
+  DEPENDENCIES geometry_msgs sensor_msgs std_msgs
 )
 ament_export_dependencies(rosidl_default_runtime)
 
@@ -159,22 +164,55 @@ if(FASTLIO_HAS_LIVOX)
   target_compile_definitions(fastlio_mapping PRIVATE FASTLIO_HAS_LIVOX)
 endif()
 
+add_executable(loop_closure_backend_node
+  src/loop_closure_backend_node.cpp
+)
+set_target_properties(loop_closure_backend_node PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED ON
+)
+target_include_directories(loop_closure_backend_node PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+  $<INSTALL_INTERFACE:include>
+  ${PCL_INCLUDE_DIRS}
+)
+target_link_libraries(loop_closure_backend_node
+  ${PCL_LIBRARIES}
+  Eigen3::Eigen
+  gtsam
+)
+
 list(APPEND EOL_LIST "foxy" "galactic" "eloquent" "dashing" "crystal")
 
 if($ENV{ROS_DISTRO} IN_LIST EOL_LIST)
   # Custommsg to support foxy & galactic
   rosidl_target_interfaces(fastlio_mapping
     ${PROJECT_NAME} "rosidl_typesupport_cpp")
+  rosidl_target_interfaces(loop_closure_backend_node
+    ${PROJECT_NAME} "rosidl_typesupport_cpp")
 else()
   rosidl_get_typesupport_target(cpp_typesupport_target
     ${PROJECT_NAME} "rosidl_typesupport_cpp")
   target_link_libraries(fastlio_mapping ${cpp_typesupport_target})
+  target_link_libraries(loop_closure_backend_node ${cpp_typesupport_target})
 endif()
 
 ament_target_dependencies(fastlio_mapping ${dependencies})
+ament_target_dependencies(loop_closure_backend_node
+  rclcpp
+  geometry_msgs
+  nav_msgs
+  sensor_msgs
+  std_msgs
+  visualization_msgs
+  tf2
+  tf2_ros
+  pcl_conversions
+)
 
 # ---------------- Install --------------- #
-install(TARGETS fastlio_mapping
+install(TARGETS fastlio_mapping loop_closure_backend_node
   DESTINATION lib/${PROJECT_NAME}
 )
 

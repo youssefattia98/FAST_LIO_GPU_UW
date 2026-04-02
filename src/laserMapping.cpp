@@ -48,6 +48,7 @@
 #include <algorithm>
 #include <limits>
 #include <array>
+#include <unordered_map>
 #include <Python.h>
 #include <so3_math.h>
 #include <rclcpp/rclcpp.hpp>
@@ -61,6 +62,8 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <visualization_msgs/msg/marker.hpp>
+#include <fast_lio/msg/frontend_frame.hpp>
+#include <fast_lio/msg/optimized_keyframes.hpp>
 #include <pcl_conversions/pcl_conversions.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -70,6 +73,7 @@
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <sensor_msgs/msg/fluid_pressure.hpp>
+#include <std_msgs/msg/u_int32.hpp>
 #include <std_srvs/srv/trigger.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 #include <tf2_ros/static_transform_broadcaster.h>
@@ -116,6 +120,10 @@ string pressure_topic;
 string map_frame_id;
 string odom_frame_id = "camera_init";
 string body_frame_id = "body";
+string frontend_frame_topic = "/fastlio/frontend_frame";
+string loop_closure_keyframe_id_topic = "/fastlio/keyframe_id";
+string loop_closure_optimized_keyframes_topic = "/fastlio/optimized_keyframes";
+string loop_closure_map_to_odom_topic = "/fastlio/map_to_odom";
 
 double res_mean_last = 0.05, total_residual = 0.0;
 double last_timestamp_lidar = 0, last_timestamp_imu = -1.0;
@@ -142,10 +150,58 @@ bool    pressure_enabled = false;
 double  pressure_cov_floor_std = 4.09;
 double  pressure_reference_pa = 101325.0;
 bool    pressure_ref_initialized = false;
+bool    loop_closure_enabled = false;
+bool    loop_closure_frontend_feedback_enable = false;
+int     loop_closure_frontend_frame_stride = 1;
+size_t  loop_closure_frontend_frame_cache_size = 256;
+double  loop_closure_feedback_min_translation = 0.10;
+double  loop_closure_feedback_min_yaw_deg = 0.5;
+double  loop_closure_feedback_pose_position_cov = 1.0e-4;
+double  loop_closure_feedback_pose_rotation_cov = 1.0e-4;
+double  loop_closure_feedback_cross_cov_scale = 0.25;
+int     loop_closure_feedback_rebuild_search_num = 10;
 double  pressure_ref_sum = 0.0;
 int     pressure_ref_count = 0;
 constexpr int kPressureRefInitSamples = 30;
 constexpr double kPressureDensityFreshWater = 997.0;
+uint32_t frontend_scan_id = 0;
+std::mutex loop_closure_tf_mutex;
+geometry_msgs::msg::TransformStamped loop_closure_map_to_odom_tf;
+bool loop_closure_map_to_odom_available = false;
+std::mutex loop_closure_feedback_mutex;
+uint64_t loop_closure_feedback_optimized_version = 0;
+uint64_t loop_closure_feedback_applied_version = 0;
+uint32_t loop_closure_feedback_last_applied_scan_id = 0;
+
+struct LoopClosurePose6D
+{
+    double x = 0.0;
+    double y = 0.0;
+    double z = 0.0;
+    double roll = 0.0;
+    double pitch = 0.0;
+    double yaw = 0.0;
+};
+
+struct LoopClosureFrontendFrameCache
+{
+    uint32_t scan_id = 0;
+    double stamp_sec = 0.0;
+    LoopClosurePose6D raw_pose;
+    PointCloudXYZI::Ptr cloud_body;
+};
+
+struct LoopClosureOptimizedKeyframesCache
+{
+    uint64_t version = 0;
+    std::vector<uint32_t> scan_ids;
+    std::vector<LoopClosurePose6D> poses_in_map;
+};
+
+deque<LoopClosureFrontendFrameCache> loop_closure_recent_frontend_frames;
+std::vector<LoopClosureFrontendFrameCache> loop_closure_keyframe_cache;
+std::unordered_map<uint32_t, size_t> loop_closure_keyframe_index_by_scan_id;
+LoopClosureOptimizedKeyframesCache loop_closure_optimized_keyframes_cache;
 
 vector<vector<int>>  pointSearchInd_surf; 
 vector<BoxPointType> cub_needrm;
@@ -268,6 +324,320 @@ void RGBpointBodyToWorld(PointType const * const pi, PointType * const po)
     po->y = p_global(1);
     po->z = p_global(2);
     po->intensity = pi->intensity;
+}
+
+LoopClosurePose6D loop_closure_pose_from_state(const state_ikfom &state)
+{
+    LoopClosurePose6D pose;
+    pose.x = state.pos(0);
+    pose.y = state.pos(1);
+    pose.z = state.pos(2);
+    const V3D euler = SO3ToEuler(state.rot);
+    constexpr double kDegToRad = M_PI / 180.0;
+    pose.roll = euler(0) * kDegToRad;
+    pose.pitch = euler(1) * kDegToRad;
+    pose.yaw = euler(2) * kDegToRad;
+    return pose;
+}
+
+LoopClosurePose6D loop_closure_pose_from_msg(const geometry_msgs::msg::Pose &pose_msg)
+{
+    LoopClosurePose6D pose;
+    pose.x = pose_msg.position.x;
+    pose.y = pose_msg.position.y;
+    pose.z = pose_msg.position.z;
+    Eigen::Quaterniond quat(
+        pose_msg.orientation.w,
+        pose_msg.orientation.x,
+        pose_msg.orientation.y,
+        pose_msg.orientation.z);
+    const Eigen::Vector3d ypr = quat.toRotationMatrix().eulerAngles(2, 1, 0);
+    pose.yaw = ypr[0];
+    pose.pitch = ypr[1];
+    pose.roll = ypr[2];
+    return pose;
+}
+
+Eigen::Affine3d loop_closure_pose_to_affine(const LoopClosurePose6D &pose)
+{
+    Eigen::Affine3d transform = Eigen::Affine3d::Identity();
+    transform.translation() << pose.x, pose.y, pose.z;
+    transform.linear() =
+        (Eigen::AngleAxisd(pose.yaw, Eigen::Vector3d::UnitZ()) *
+         Eigen::AngleAxisd(pose.pitch, Eigen::Vector3d::UnitY()) *
+         Eigen::AngleAxisd(pose.roll, Eigen::Vector3d::UnitX())).toRotationMatrix();
+    return transform;
+}
+
+LoopClosurePose6D loop_closure_pose_from_affine(const Eigen::Affine3d &transform)
+{
+    LoopClosurePose6D pose;
+    pose.x = transform.translation().x();
+    pose.y = transform.translation().y();
+    pose.z = transform.translation().z();
+    const Eigen::Vector3d ypr = transform.rotation().eulerAngles(2, 1, 0);
+    pose.yaw = ypr[0];
+    pose.pitch = ypr[1];
+    pose.roll = ypr[2];
+    return pose;
+}
+
+double loop_closure_normalize_angle(double angle)
+{
+    while (angle > M_PI) {
+        angle -= 2.0 * M_PI;
+    }
+    while (angle < -M_PI) {
+        angle += 2.0 * M_PI;
+    }
+    return angle;
+}
+
+void cache_loop_closure_frontend_frame(
+    uint32_t scan_id,
+    double stamp_sec,
+    const LoopClosurePose6D &raw_pose,
+    const PointCloudXYZI::Ptr &cloud_body)
+{
+    if (!loop_closure_frontend_feedback_enable || !cloud_body) {
+        return;
+    }
+
+    LoopClosureFrontendFrameCache frame;
+    frame.scan_id = scan_id;
+    frame.stamp_sec = stamp_sec;
+    frame.raw_pose = raw_pose;
+    frame.cloud_body.reset(new PointCloudXYZI(*cloud_body));
+
+    std::lock_guard<std::mutex> lock(loop_closure_feedback_mutex);
+    loop_closure_recent_frontend_frames.push_back(frame);
+    while (loop_closure_recent_frontend_frames.size() > loop_closure_frontend_frame_cache_size) {
+        loop_closure_recent_frontend_frames.pop_front();
+    }
+}
+
+void loop_closure_keyframe_id_cbk(const std_msgs::msg::UInt32::SharedPtr msg)
+{
+    if (!loop_closure_frontend_feedback_enable) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(loop_closure_feedback_mutex);
+    if (loop_closure_keyframe_index_by_scan_id.count(msg->data) > 0) {
+        return;
+    }
+
+    auto recent_it = std::find_if(
+        loop_closure_recent_frontend_frames.rbegin(),
+        loop_closure_recent_frontend_frames.rend(),
+        [&](const LoopClosureFrontendFrameCache &frame) { return frame.scan_id == msg->data; });
+    if (recent_it == loop_closure_recent_frontend_frames.rend()) {
+        return;
+    }
+
+    loop_closure_keyframe_cache.push_back(*recent_it);
+    loop_closure_keyframe_index_by_scan_id[msg->data] = loop_closure_keyframe_cache.size() - 1;
+}
+
+void loop_closure_optimized_keyframes_cbk(const fast_lio::msg::OptimizedKeyframes::SharedPtr msg)
+{
+    if (!loop_closure_frontend_feedback_enable) {
+        return;
+    }
+    if (msg->scan_ids.size() != msg->poses_in_map.size()) {
+        return;
+    }
+
+    LoopClosureOptimizedKeyframesCache cache;
+    cache.scan_ids = msg->scan_ids;
+    cache.poses_in_map.reserve(msg->poses_in_map.size());
+    for (const auto &pose_msg : msg->poses_in_map) {
+        cache.poses_in_map.push_back(loop_closure_pose_from_msg(pose_msg));
+    }
+
+    std::lock_guard<std::mutex> lock(loop_closure_feedback_mutex);
+    cache.version = loop_closure_feedback_optimized_version + 1;
+    loop_closure_feedback_optimized_version = cache.version;
+    loop_closure_optimized_keyframes_cache = std::move(cache);
+}
+
+void reset_loop_closure_map_to_odom_identity()
+{
+    std::lock_guard<std::mutex> lock(loop_closure_tf_mutex);
+    loop_closure_map_to_odom_tf.header.frame_id = map_frame_id;
+    loop_closure_map_to_odom_tf.child_frame_id = odom_frame_id;
+    loop_closure_map_to_odom_tf.transform.translation.x = 0.0;
+    loop_closure_map_to_odom_tf.transform.translation.y = 0.0;
+    loop_closure_map_to_odom_tf.transform.translation.z = 0.0;
+    loop_closure_map_to_odom_tf.transform.rotation.x = 0.0;
+    loop_closure_map_to_odom_tf.transform.rotation.y = 0.0;
+    loop_closure_map_to_odom_tf.transform.rotation.z = 0.0;
+    loop_closure_map_to_odom_tf.transform.rotation.w = 1.0;
+    loop_closure_map_to_odom_available = true;
+}
+
+void apply_loop_closure_pose_covariance()
+{
+    auto P_updated = kf.get_P();
+    for (int row = 0; row < 6; ++row) {
+        for (int col = 6; col < P_updated.cols(); ++col) {
+            P_updated(row, col) *= loop_closure_feedback_cross_cov_scale;
+            P_updated(col, row) = P_updated(row, col);
+        }
+    }
+
+    for (int idx = 0; idx < 3; ++idx) {
+        P_updated(idx, idx) = std::min(P_updated(idx, idx), loop_closure_feedback_pose_position_cov);
+    }
+    for (int idx = 3; idx < 6; ++idx) {
+        P_updated(idx, idx) = std::min(P_updated(idx, idx), loop_closure_feedback_pose_rotation_cov);
+    }
+
+    kf.change_P(P_updated);
+}
+
+void maybe_apply_loop_closure_frontend_feedback(rclcpp::Logger logger)
+{
+    if (!loop_closure_enabled || !loop_closure_frontend_feedback_enable) {
+        return;
+    }
+
+    struct PendingLoopClosureFeedback
+    {
+        uint64_t version = 0;
+        uint32_t scan_id = 0;
+        size_t keyframe_index = 0;
+        LoopClosurePose6D raw_keyframe_pose;
+        LoopClosurePose6D optimized_keyframe_pose;
+        std::vector<std::pair<LoopClosurePose6D, PointCloudXYZI::Ptr>> rebuild_frames;
+    } pending;
+
+    {
+        std::lock_guard<std::mutex> lock(loop_closure_feedback_mutex);
+        if (loop_closure_optimized_keyframes_cache.version == 0 ||
+            loop_closure_optimized_keyframes_cache.version == loop_closure_feedback_applied_version ||
+            loop_closure_keyframe_cache.empty())
+        {
+            return;
+        }
+
+        std::unordered_map<uint32_t, size_t> optimized_index_by_scan_id;
+        optimized_index_by_scan_id.reserve(loop_closure_optimized_keyframes_cache.scan_ids.size());
+        for (size_t idx = 0; idx < loop_closure_optimized_keyframes_cache.scan_ids.size(); ++idx) {
+            optimized_index_by_scan_id[loop_closure_optimized_keyframes_cache.scan_ids[idx]] = idx;
+        }
+
+        for (int idx = static_cast<int>(loop_closure_optimized_keyframes_cache.scan_ids.size()) - 1; idx >= 0; --idx) {
+            const uint32_t scan_id = loop_closure_optimized_keyframes_cache.scan_ids[static_cast<size_t>(idx)];
+            const auto keyframe_it = loop_closure_keyframe_index_by_scan_id.find(scan_id);
+            if (keyframe_it == loop_closure_keyframe_index_by_scan_id.end()) {
+                continue;
+            }
+
+            pending.version = loop_closure_optimized_keyframes_cache.version;
+            pending.scan_id = scan_id;
+            pending.keyframe_index = keyframe_it->second;
+            pending.raw_keyframe_pose = loop_closure_keyframe_cache[pending.keyframe_index].raw_pose;
+            pending.optimized_keyframe_pose = loop_closure_optimized_keyframes_cache.poses_in_map[static_cast<size_t>(idx)];
+
+            const int start_idx = std::max<int>(0, static_cast<int>(pending.keyframe_index) - loop_closure_feedback_rebuild_search_num);
+            const int end_idx = std::min<int>(
+                static_cast<int>(loop_closure_keyframe_cache.size()) - 1,
+                static_cast<int>(pending.keyframe_index) + loop_closure_feedback_rebuild_search_num);
+
+            for (int key_idx = start_idx; key_idx <= end_idx; ++key_idx) {
+                const auto &keyframe = loop_closure_keyframe_cache[static_cast<size_t>(key_idx)];
+                const auto opt_it = optimized_index_by_scan_id.find(keyframe.scan_id);
+                if (opt_it == optimized_index_by_scan_id.end() || !keyframe.cloud_body || keyframe.cloud_body->empty()) {
+                    continue;
+                }
+                pending.rebuild_frames.emplace_back(
+                    loop_closure_optimized_keyframes_cache.poses_in_map[opt_it->second],
+                    keyframe.cloud_body);
+            }
+            break;
+        }
+    }
+
+    if (pending.version == 0 || pending.scan_id == 0) {
+        return;
+    }
+
+    const Eigen::Affine3d raw_keyframe_affine = loop_closure_pose_to_affine(pending.raw_keyframe_pose);
+    const Eigen::Affine3d optimized_keyframe_affine = loop_closure_pose_to_affine(pending.optimized_keyframe_pose);
+    const Eigen::Affine3d correction = optimized_keyframe_affine * raw_keyframe_affine.inverse();
+
+    const double correction_translation = correction.translation().norm();
+    const Eigen::Vector3d correction_ypr = correction.rotation().eulerAngles(2, 1, 0);
+    const double correction_yaw_deg = std::abs(loop_closure_normalize_angle(correction_ypr[0])) * 180.0 / M_PI;
+
+    {
+        std::lock_guard<std::mutex> lock(loop_closure_feedback_mutex);
+        if (pending.version == loop_closure_feedback_applied_version &&
+            pending.scan_id == loop_closure_feedback_last_applied_scan_id)
+        {
+            return;
+        }
+    }
+
+    if (correction_translation < loop_closure_feedback_min_translation &&
+        correction_yaw_deg < loop_closure_feedback_min_yaw_deg)
+    {
+        std::lock_guard<std::mutex> lock(loop_closure_feedback_mutex);
+        loop_closure_feedback_applied_version = pending.version;
+        loop_closure_feedback_last_applied_scan_id = pending.scan_id;
+        return;
+    }
+
+    state_ikfom state_updated = kf.get_x();
+    const Eigen::Affine3d current_pose = loop_closure_pose_to_affine(loop_closure_pose_from_state(state_updated));
+    const Eigen::Affine3d corrected_pose = correction * current_pose;
+    const Eigen::Quaterniond corrected_quat(corrected_pose.rotation());
+    const Eigen::Vector3d corrected_pos = corrected_pose.translation();
+    state_updated.rot = corrected_quat;
+    state_updated.pos[0] = corrected_pos.x();
+    state_updated.pos[1] = corrected_pos.y();
+    state_updated.pos[2] = corrected_pos.z();
+    kf.change_x(state_updated);
+    apply_loop_closure_pose_covariance();
+
+    state_point = kf.get_x();
+    euler_cur = SO3ToEuler(state_point.rot);
+    pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
+    geoQuat.x = state_point.rot.coeffs()[0];
+    geoQuat.y = state_point.rot.coeffs()[1];
+    geoQuat.z = state_point.rot.coeffs()[2];
+    geoQuat.w = state_point.rot.coeffs()[3];
+
+    if (!pending.rebuild_frames.empty()) {
+        PointCloudXYZI::Ptr rebuilt_submap(new PointCloudXYZI());
+        for (const auto &entry : pending.rebuild_frames) {
+            PointCloudXYZI transformed_cloud;
+            pcl::transformPointCloud(*entry.second, transformed_cloud, loop_closure_pose_to_affine(entry.first).matrix().cast<float>());
+            *rebuilt_submap += transformed_cloud;
+        }
+
+        if (!rebuilt_submap->empty()) {
+            pcl::VoxelGrid<PointType> downsampler;
+            downsampler.setLeafSize(filter_size_map_min, filter_size_map_min, filter_size_map_min);
+            PointCloudXYZI::Ptr rebuilt_submap_ds(new PointCloudXYZI());
+            downsampler.setInputCloud(rebuilt_submap);
+            downsampler.filter(*rebuilt_submap_ds);
+            if (!rebuilt_submap_ds->empty()) {
+                ikdtree.set_downsample_param(filter_size_map_min);
+                ikdtree.Build(rebuilt_submap_ds->points);
+            }
+        }
+    }
+
+    reset_loop_closure_map_to_odom_identity();
+
+    {
+        std::lock_guard<std::mutex> lock(loop_closure_feedback_mutex);
+        loop_closure_feedback_applied_version = pending.version;
+        loop_closure_feedback_last_applied_scan_id = pending.scan_id;
+    }
+
 }
 
 void RGBpointBodyLidarToIMU(PointType const * const pi, PointType * const po)
@@ -505,6 +875,13 @@ void pressure_cbk(const sensor_msgs::msg::FluidPressure::UniquePtr msg_in)
     mtx_buffer.unlock();
     process_wakeup_requested.store(true, std::memory_order_release);
     sig_buffer.notify_all();
+}
+
+void loop_closure_map_to_odom_cbk(const geometry_msgs::msg::TransformStamped::SharedPtr msg)
+{
+    std::lock_guard<std::mutex> lock(loop_closure_tf_mutex);
+    loop_closure_map_to_odom_tf = *msg;
+    loop_closure_map_to_odom_available = true;
 }
 
 double lidar_mean_scantime = 0.0;
@@ -892,6 +1269,90 @@ void publish_frame_body(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::Shared
     publish_count -= PUBFRAME_PERIOD;
 }
 
+void publish_frontend_frame(rclcpp::Publisher<fast_lio::msg::FrontendFrame>::SharedPtr pubFrontendFrame)
+{
+    if (!pubFrontendFrame) {
+        return;
+    }
+
+    PointCloudXYZI::Ptr cloud_for_transform = feats_undistort;
+    int size = feats_undistort->points.size();
+    PointCloudXYZI::Ptr laserCloudIMUBody = publish_body_buffer;
+    laserCloudIMUBody->clear();
+    laserCloudIMUBody->reserve(size);
+    const double blind_max_sq = publish_blind_max > 0.0 ? publish_blind_max * publish_blind_max : 0.0;
+
+    if (publish_blind_max > 0.0)
+    {
+        PointCloudXYZI::Ptr filtered = publish_body_filter_buffer;
+        filtered->clear();
+        filtered->reserve(size);
+        for (int i = 0; i < size; i++)
+        {
+            const PointType &src_pt = feats_undistort->points[i];
+            const double range_sq = src_pt.x * src_pt.x + src_pt.y * src_pt.y + src_pt.z * src_pt.z;
+            if (range_sq < blind_max_sq)
+            {
+                filtered->points.push_back(src_pt);
+            }
+        }
+        filtered->width = filtered->points.size();
+        filtered->height = 1;
+        filtered->is_dense = true;
+        cloud_for_transform = filtered;
+        size = static_cast<int>(cloud_for_transform->points.size());
+    }
+
+    bool transformed_on_gpu = false;
+#ifdef FASTLIO_USE_CUDA
+    if (gpu_point_transformer && gpu_point_transformer->available() && size > 0)
+    {
+        const Eigen::Matrix3d rot_body_lidar_d = state_point.offset_R_L_I.toRotationMatrix();
+        const Eigen::Vector3d t_body_lidar_d(state_point.offset_T_L_I[0], state_point.offset_T_L_I[1], state_point.offset_T_L_I[2]);
+        transformed_on_gpu = gpu_point_transformer->transform(*cloud_for_transform,
+                                                               *laserCloudIMUBody,
+                                                               rot_body_lidar_d.cast<float>(),
+                                                               t_body_lidar_d.cast<float>());
+    }
+#endif
+
+    if (!transformed_on_gpu)
+    {
+        for (int i = 0; i < size; i++)
+        {
+            const PointType &src_pt = cloud_for_transform->points[i];
+
+            PointType body_pt;
+            RGBpointBodyLidarToIMU(&src_pt, &body_pt);
+            laserCloudIMUBody->points.push_back(body_pt);
+        }
+        laserCloudIMUBody->width = laserCloudIMUBody->points.size();
+        laserCloudIMUBody->height = 1;
+        laserCloudIMUBody->is_dense = true;
+    }
+
+    fast_lio::msg::FrontendFrame frontend_frame;
+    frontend_frame.header.stamp = get_ros_time(lidar_end_time);
+    frontend_frame.header.frame_id = odom_frame_id;
+    frontend_frame.scan_id = frontend_scan_id;
+    frontend_frame.pose_in_odom.position.x = state_point.pos(0);
+    frontend_frame.pose_in_odom.position.y = state_point.pos(1);
+    frontend_frame.pose_in_odom.position.z = state_point.pos(2);
+    frontend_frame.pose_in_odom.orientation.x = geoQuat.x;
+    frontend_frame.pose_in_odom.orientation.y = geoQuat.y;
+    frontend_frame.pose_in_odom.orientation.z = geoQuat.z;
+    frontend_frame.pose_in_odom.orientation.w = geoQuat.w;
+    pcl::toROSMsg(*laserCloudIMUBody, frontend_frame.cloud_body);
+    frontend_frame.cloud_body.header.stamp = frontend_frame.header.stamp;
+    frontend_frame.cloud_body.header.frame_id = body_frame_id;
+    cache_loop_closure_frontend_frame(
+        frontend_frame.scan_id,
+        lidar_end_time,
+        loop_closure_pose_from_state(state_point),
+        laserCloudIMUBody);
+    pubFrontendFrame->publish(frontend_frame);
+}
+
 void publish_effect_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudEffect)
 {
     PointCloudXYZI::Ptr laserCloudWorld = publish_effect_buffer;
@@ -990,6 +1451,32 @@ void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPt
     trans.transform.rotation.y = odomAftMapped.pose.pose.orientation.y;
     trans.transform.rotation.z = odomAftMapped.pose.pose.orientation.z;
     tf_br->sendTransform(trans);
+
+    if (loop_closure_enabled)
+    {
+        geometry_msgs::msg::TransformStamped map_to_odom;
+        if (loop_closure_frontend_feedback_enable)
+        {
+            map_to_odom.header.frame_id = map_frame_id;
+            map_to_odom.child_frame_id = odom_frame_id;
+            map_to_odom.transform.translation.x = 0.0;
+            map_to_odom.transform.translation.y = 0.0;
+            map_to_odom.transform.translation.z = 0.0;
+            map_to_odom.transform.rotation.x = 0.0;
+            map_to_odom.transform.rotation.y = 0.0;
+            map_to_odom.transform.rotation.z = 0.0;
+            map_to_odom.transform.rotation.w = 1.0;
+        }
+        else
+        {
+            std::lock_guard<std::mutex> lock(loop_closure_tf_mutex);
+            map_to_odom = loop_closure_map_to_odom_tf;
+        }
+        map_to_odom.header.stamp = odomAftMapped.header.stamp;
+        map_to_odom.header.frame_id = map_frame_id;
+        map_to_odom.child_frame_id = odom_frame_id;
+        tf_br->sendTransform(map_to_odom);
+    }
 }
 
 void publish_path(rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath)
@@ -1232,6 +1719,20 @@ public:
         this->declare_parameter<vector<double>>("pressure.extrinsic_T", vector<double>());
         this->declare_parameter<double>("pressure.covariance_floor_std", 4.09);
         this->declare_parameter<double>("pressure.reference_pressure_pa", 101325.0);
+        this->declare_parameter<bool>("loop_closure.enable", false);
+        this->declare_parameter<string>("loop_closure.frontend_frame_topic", frontend_frame_topic);
+        this->declare_parameter<string>("loop_closure.keyframe_id_topic", loop_closure_keyframe_id_topic);
+        this->declare_parameter<string>("loop_closure.optimized_keyframes_topic", loop_closure_optimized_keyframes_topic);
+        this->declare_parameter<string>("loop_closure.map_to_odom_topic", loop_closure_map_to_odom_topic);
+        this->declare_parameter<int>("loop_closure.frontend_frame_stride", 1);
+        this->declare_parameter<int>("loop_closure.frontend_frame_cache_size", 256);
+        this->declare_parameter<bool>("loop_closure.frontend_feedback_enable", false);
+        this->declare_parameter<double>("loop_closure.feedback_min_translation", 0.10);
+        this->declare_parameter<double>("loop_closure.feedback_min_yaw_deg", 0.5);
+        this->declare_parameter<double>("loop_closure.feedback_pose_position_cov", 1.0e-4);
+        this->declare_parameter<double>("loop_closure.feedback_pose_rotation_cov", 1.0e-4);
+        this->declare_parameter<double>("loop_closure.feedback_cross_cov_scale", 0.25);
+        this->declare_parameter<int>("loop_closure.feedback_rebuild_search_num", 10);
         this->declare_parameter<bool>("dynamics.enable", true);
         this->declare_parameter<string>("dynamics.config_name", "default_value");
         this->declare_parameter<string>("dynamics.config_path", "");
@@ -1304,6 +1805,24 @@ public:
         this->get_parameter_or<vector<double>>("pressure.extrinsic_T", pressure_extrinT, vector<double>());
         this->get_parameter_or<double>("pressure.covariance_floor_std", pressure_cov_floor_std, 4.09);
         this->get_parameter_or<double>("pressure.reference_pressure_pa", pressure_reference_pa, 101325.0);
+        this->get_parameter_or<bool>("loop_closure.enable", loop_closure_enabled, false);
+        this->get_parameter_or<string>("loop_closure.frontend_frame_topic", frontend_frame_topic, frontend_frame_topic);
+        this->get_parameter_or<string>("loop_closure.keyframe_id_topic", loop_closure_keyframe_id_topic, loop_closure_keyframe_id_topic);
+        this->get_parameter_or<string>("loop_closure.optimized_keyframes_topic", loop_closure_optimized_keyframes_topic, loop_closure_optimized_keyframes_topic);
+        this->get_parameter_or<string>("loop_closure.map_to_odom_topic", loop_closure_map_to_odom_topic, loop_closure_map_to_odom_topic);
+        this->get_parameter_or<int>("loop_closure.frontend_frame_stride", loop_closure_frontend_frame_stride, 1);
+        int frontend_frame_cache_size_param = static_cast<int>(loop_closure_frontend_frame_cache_size);
+        this->get_parameter_or<int>("loop_closure.frontend_frame_cache_size", frontend_frame_cache_size_param, frontend_frame_cache_size_param);
+        loop_closure_frontend_frame_cache_size = static_cast<size_t>(std::max(16, frontend_frame_cache_size_param));
+        this->get_parameter_or<bool>("loop_closure.frontend_feedback_enable", loop_closure_frontend_feedback_enable, false);
+        this->get_parameter_or<double>("loop_closure.feedback_min_translation", loop_closure_feedback_min_translation, 0.10);
+        this->get_parameter_or<double>("loop_closure.feedback_min_yaw_deg", loop_closure_feedback_min_yaw_deg, 0.5);
+        this->get_parameter_or<double>("loop_closure.feedback_pose_position_cov", loop_closure_feedback_pose_position_cov, 1.0e-4);
+        this->get_parameter_or<double>("loop_closure.feedback_pose_rotation_cov", loop_closure_feedback_pose_rotation_cov, 1.0e-4);
+        this->get_parameter_or<double>("loop_closure.feedback_cross_cov_scale", loop_closure_feedback_cross_cov_scale, 0.25);
+        this->get_parameter_or<int>("loop_closure.feedback_rebuild_search_num", loop_closure_feedback_rebuild_search_num, 10);
+        loop_closure_feedback_cross_cov_scale = std::clamp(loop_closure_feedback_cross_cov_scale, 0.0, 1.0);
+        loop_closure_feedback_rebuild_search_num = std::max(0, loop_closure_feedback_rebuild_search_num);
         this->get_parameter_or<bool>("dynamics.enable", dynamics_enabled_, true);
         this->get_parameter_or<string>("dynamics.config_name", dynamics_config_name_, "default_value");
         this->get_parameter_or<string>("dynamics.config_path", dynamics_config_path_, "");
@@ -1314,6 +1833,7 @@ public:
         this->get_parameter_or<string>("frames.map_frame", map_frame_id, map_frame_id);
         this->get_parameter_or<string>("frames.odom_frame", odom_frame_id, odom_frame_id);
         this->get_parameter_or<string>("frames.body_frame", body_frame_id, body_frame_id);
+        loop_closure_frontend_frame_stride = std::max(1, loop_closure_frontend_frame_stride);
     #ifdef MP_EN
         omp_set_num_threads(MP_PROC_NUM);
     #endif
@@ -1477,20 +1997,60 @@ public:
         pubLaserCloudMap_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/Laser_map", 20);
         pubOdomAftMapped_ = this->create_publisher<nav_msgs::msg::Odometry>("/Odometry", 20);
         pubPath_ = this->create_publisher<nav_msgs::msg::Path>("/path", 20);
+        if (loop_closure_enabled)
+        {
+            pubFrontendFrame_ = this->create_publisher<fast_lio::msg::FrontendFrame>(frontend_frame_topic, 20);
+            {
+                std::lock_guard<std::mutex> lock(loop_closure_tf_mutex);
+                loop_closure_map_to_odom_tf.header.frame_id = map_frame_id;
+                loop_closure_map_to_odom_tf.child_frame_id = odom_frame_id;
+                loop_closure_map_to_odom_tf.transform.translation.x = 0.0;
+                loop_closure_map_to_odom_tf.transform.translation.y = 0.0;
+                loop_closure_map_to_odom_tf.transform.translation.z = 0.0;
+                loop_closure_map_to_odom_tf.transform.rotation.x = 0.0;
+                loop_closure_map_to_odom_tf.transform.rotation.y = 0.0;
+                loop_closure_map_to_odom_tf.transform.rotation.z = 0.0;
+                loop_closure_map_to_odom_tf.transform.rotation.w = 1.0;
+                loop_closure_map_to_odom_available = true;
+            }
+            auto map_to_odom_qos = rclcpp::QoS(1).transient_local();
+            sub_loop_closure_map_to_odom_ =
+                this->create_subscription<geometry_msgs::msg::TransformStamped>(
+                    loop_closure_map_to_odom_topic,
+                    map_to_odom_qos,
+                    loop_closure_map_to_odom_cbk);
+            if (loop_closure_frontend_feedback_enable)
+            {
+                sub_loop_closure_keyframe_id_ =
+                    this->create_subscription<std_msgs::msg::UInt32>(
+                        loop_closure_keyframe_id_topic,
+                        20,
+                        loop_closure_keyframe_id_cbk);
+                sub_loop_closure_optimized_keyframes_ =
+                    this->create_subscription<fast_lio::msg::OptimizedKeyframes>(
+                        loop_closure_optimized_keyframes_topic,
+                        rclcpp::QoS(1).transient_local(),
+                        loop_closure_optimized_keyframes_cbk);
+                reset_loop_closure_map_to_odom_identity();
+            }
+        }
     tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
     static_tf_broadcaster_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(*this);
-    geometry_msgs::msg::TransformStamped map_to_camera;
-    map_to_camera.header.stamp = this->now();
-    map_to_camera.header.frame_id = map_frame_id;
-    map_to_camera.child_frame_id = odom_frame_id;
-    map_to_camera.transform.translation.x = 0.0;
-    map_to_camera.transform.translation.y = 0.0;
-    map_to_camera.transform.translation.z = 0.0;
-    map_to_camera.transform.rotation.x = 0.0;
-    map_to_camera.transform.rotation.y = 0.0;
-    map_to_camera.transform.rotation.z = 0.0;
-    map_to_camera.transform.rotation.w = 1.0;
-    static_tf_broadcaster_->sendTransform(map_to_camera);
+    if (!loop_closure_enabled)
+    {
+        geometry_msgs::msg::TransformStamped map_to_camera;
+        map_to_camera.header.stamp = this->now();
+        map_to_camera.header.frame_id = map_frame_id;
+        map_to_camera.child_frame_id = odom_frame_id;
+        map_to_camera.transform.translation.x = 0.0;
+        map_to_camera.transform.translation.y = 0.0;
+        map_to_camera.transform.translation.z = 0.0;
+        map_to_camera.transform.rotation.x = 0.0;
+        map_to_camera.transform.rotation.y = 0.0;
+        map_to_camera.transform.rotation.z = 0.0;
+        map_to_camera.transform.rotation.w = 1.0;
+        static_tf_broadcaster_->sendTransform(map_to_camera);
+    }
 
         //------------------------------------------------------------------------------------------------------
         processing_worker_running_.store(true, std::memory_order_release);
@@ -1733,8 +2293,16 @@ public:
             if (path_en)                         publish_path(pubPath_);
             if (scan_pub_en)      publish_frame_world(pubLaserCloudFull_);
             if (scan_pub_en && scan_body_pub_en) publish_frame_body(pubLaserCloudFull_body_);
+            if (loop_closure_enabled && (frontend_scan_id % static_cast<uint32_t>(loop_closure_frontend_frame_stride) == 0)) {
+                publish_frontend_frame(pubFrontendFrame_);
+            }
+            if (loop_closure_enabled && loop_closure_frontend_feedback_enable) {
+                maybe_apply_loop_closure_frontend_feedback(this->get_logger());
+            }
             if (effect_pub_en) publish_effect_world(pubLaserCloudEffect_);
             // if (map_pub_en) publish_map(pubLaserCloudMap_);
+
+            ++frontend_scan_id;
 
             /*** Debug variables ***/
             if (runtime_pos_log)
@@ -1796,10 +2364,14 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudMap_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath_;
+    rclcpp::Publisher<fast_lio::msg::FrontendFrame>::SharedPtr pubFrontendFrame_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu_;
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr sub_thrusters_;
     rclcpp::Subscription<geometry_msgs::msg::TwistWithCovarianceStamped>::SharedPtr sub_dvl_;
     rclcpp::Subscription<sensor_msgs::msg::FluidPressure>::SharedPtr sub_pressure_;
+    rclcpp::Subscription<geometry_msgs::msg::TransformStamped>::SharedPtr sub_loop_closure_map_to_odom_;
+    rclcpp::Subscription<std_msgs::msg::UInt32>::SharedPtr sub_loop_closure_keyframe_id_;
+    rclcpp::Subscription<fast_lio::msg::OptimizedKeyframes>::SharedPtr sub_loop_closure_optimized_keyframes_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_pcl_pc_;
 #ifdef FASTLIO_HAS_LIVOX
     rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr sub_pcl_livox_;
