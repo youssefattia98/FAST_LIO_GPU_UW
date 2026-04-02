@@ -73,20 +73,7 @@
 
         loop_closure:
             enable: true
-            frontend_frame_topic: "/fastlio/frontend_frame"
             frontend_frame_stride: 2
-            keyframe_id_topic: "/fastlio/keyframe_id"
-            keyframe_path_topic: "/fastlio/keyframe_path"
-            keyframe_map_topic: "/fastlio/keyframe_map"
-            optimized_path_topic: "/fastlio/optimized_path"
-            optimized_keyframes_topic: "/fastlio/optimized_keyframes"
-            optimized_map_topic: "/fastlio/optimized_map"
-            optimized_odom_topic: "/fastlio/optimized_odom"
-            map_to_odom_topic: "/fastlio/map_to_odom"
-            loop_marker_topic: "/fastlio/loop_candidate_constraints"
-            loop_candidate_current_topic: "/fastlio/loop_candidate_current"
-            loop_candidate_history_topic: "/fastlio/loop_candidate_history"
-            loop_candidate_registered_topic: "/fastlio/loop_candidate_registered"
             keyframe_meter_gap: 2.0
             keyframe_deg_gap: 10.0
             frontend_frame_cache_size: 256
@@ -102,7 +89,6 @@
             history_keyframe_search_num: 10
             loop_closure_frequency: 1.0
             icp_process_frequency: 1.0
-            map_publish_frequency: 0.5
             keyframe_downsample_leaf: 0.4
             map_downsample_leaf: 0.4
             icp_max_correspondence_distance: 15.0
@@ -113,7 +99,6 @@
             odom_noise_rotation: 1.0e-6
             odom_noise_translation: 1.0e-4
             loop_noise_score: 0.5
-            optimized_child_frame: "aft_pgo"
 
         frames:
             map_frame: "World"

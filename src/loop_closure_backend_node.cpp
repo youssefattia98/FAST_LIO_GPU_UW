@@ -210,22 +210,13 @@ public:
   : Node("fastlio_loop_closure_backend")
   {
     declare_parameter<bool>("loop_closure.enable", false);
+    declare_parameter<bool>("loop_closure.frontend_feedback_enable", false);
     declare_parameter<std::string>("loop_closure.frontend_frame_topic", "/fastlio/frontend_frame");
     declare_parameter<std::string>("loop_closure.keyframe_id_topic", "/fastlio/keyframe_id");
-    declare_parameter<std::string>("loop_closure.keyframe_path_topic", "/fastlio/keyframe_path");
-    declare_parameter<std::string>("loop_closure.keyframe_map_topic", "/fastlio/keyframe_map");
-    declare_parameter<std::string>("loop_closure.optimized_path_topic", "/fastlio/optimized_path");
     declare_parameter<std::string>("loop_closure.optimized_keyframes_topic", "/fastlio/optimized_keyframes");
-    declare_parameter<std::string>("loop_closure.optimized_map_topic", "/fastlio/optimized_map");
-    declare_parameter<std::string>("loop_closure.optimized_odom_topic", "/fastlio/optimized_odom");
     declare_parameter<std::string>("loop_closure.map_to_odom_topic", "/fastlio/map_to_odom");
-    declare_parameter<std::string>("loop_closure.loop_marker_topic", "/fastlio/loop_candidate_constraints");
-    declare_parameter<std::string>("loop_closure.loop_candidate_current_topic", "/fastlio/loop_candidate_current");
-    declare_parameter<std::string>("loop_closure.loop_candidate_history_topic", "/fastlio/loop_candidate_history");
-    declare_parameter<std::string>("loop_closure.loop_candidate_registered_topic", "/fastlio/loop_candidate_registered");
     declare_parameter<std::string>("frames.map_frame", std::string("World"));
     declare_parameter<std::string>("frames.odom_frame", std::string("camera_init"));
-    declare_parameter<std::string>("loop_closure.optimized_child_frame", std::string("aft_pgo"));
     declare_parameter<double>("loop_closure.keyframe_meter_gap", 1.0);
     declare_parameter<double>("loop_closure.keyframe_deg_gap", 10.0);
     declare_parameter<double>("loop_closure.history_keyframe_search_radius", 5.0);
@@ -233,7 +224,6 @@ public:
     declare_parameter<int>("loop_closure.history_keyframe_search_num", 10);
     declare_parameter<double>("loop_closure.loop_closure_frequency", 2.0);
     declare_parameter<double>("loop_closure.icp_process_frequency", 1.0);
-    declare_parameter<double>("loop_closure.map_publish_frequency", 0.5);
     declare_parameter<double>("loop_closure.keyframe_downsample_leaf", 0.4);
     declare_parameter<double>("loop_closure.map_downsample_leaf", 0.4);
     declare_parameter<double>("loop_closure.icp_max_correspondence_distance", 15.0);
@@ -246,22 +236,13 @@ public:
     declare_parameter<double>("loop_closure.loop_noise_score", 0.5);
 
     get_parameter("loop_closure.enable", enabled_);
+    get_parameter("loop_closure.frontend_feedback_enable", frontend_feedback_enable_);
     get_parameter("loop_closure.frontend_frame_topic", frontend_frame_topic_);
     get_parameter("loop_closure.keyframe_id_topic", keyframe_id_topic_);
-    get_parameter("loop_closure.keyframe_path_topic", keyframe_path_topic_);
-    get_parameter("loop_closure.keyframe_map_topic", keyframe_map_topic_);
-    get_parameter("loop_closure.optimized_path_topic", optimized_path_topic_);
     get_parameter("loop_closure.optimized_keyframes_topic", optimized_keyframes_topic_);
-    get_parameter("loop_closure.optimized_map_topic", optimized_map_topic_);
-    get_parameter("loop_closure.optimized_odom_topic", optimized_odom_topic_);
     get_parameter("loop_closure.map_to_odom_topic", map_to_odom_topic_);
-    get_parameter("loop_closure.loop_marker_topic", loop_marker_topic_);
-    get_parameter("loop_closure.loop_candidate_current_topic", loop_candidate_current_topic_);
-    get_parameter("loop_closure.loop_candidate_history_topic", loop_candidate_history_topic_);
-    get_parameter("loop_closure.loop_candidate_registered_topic", loop_candidate_registered_topic_);
     get_parameter("frames.map_frame", map_frame_);
     get_parameter("frames.odom_frame", odom_frame_);
-    get_parameter("loop_closure.optimized_child_frame", optimized_child_frame_);
     get_parameter("loop_closure.keyframe_meter_gap", keyframe_meter_gap_);
     get_parameter("loop_closure.keyframe_deg_gap", keyframe_deg_gap_);
     get_parameter("loop_closure.history_keyframe_search_radius", history_keyframe_search_radius_);
@@ -269,7 +250,6 @@ public:
     get_parameter("loop_closure.history_keyframe_search_num", history_keyframe_search_num_);
     get_parameter("loop_closure.loop_closure_frequency", loop_closure_frequency_);
     get_parameter("loop_closure.icp_process_frequency", icp_process_frequency_);
-    get_parameter("loop_closure.map_publish_frequency", map_publish_frequency_);
     get_parameter("loop_closure.keyframe_downsample_leaf", keyframe_downsample_leaf_);
     get_parameter("loop_closure.map_downsample_leaf", map_downsample_leaf_);
     get_parameter("loop_closure.icp_max_correspondence_distance", icp_max_correspondence_distance_);
@@ -282,8 +262,6 @@ public:
     get_parameter("loop_closure.loop_noise_score", loop_noise_score_);
 
     keyframe_rad_gap_ = keyframe_deg_gap_ * M_PI / 180.0;
-    keyframe_path_.header.frame_id = odom_frame_;
-    optimized_path_.header.frame_id = map_frame_;
 
     if (!enabled_) {
       return;
@@ -295,20 +273,14 @@ public:
       frontend_frame_topic_, rclcpp::SensorDataQoS(),
       std::bind(&LoopClosureBackendNode::frontend_frame_cb, this, std::placeholders::_1));
 
-    pub_keyframe_id_ = create_publisher<std_msgs::msg::UInt32>(keyframe_id_topic_, 20);
-    pub_keyframe_path_ = create_publisher<nav_msgs::msg::Path>(keyframe_path_topic_, 20);
-    pub_keyframe_map_ = create_publisher<sensor_msgs::msg::PointCloud2>(keyframe_map_topic_, 5);
-    pub_optimized_path_ = create_publisher<nav_msgs::msg::Path>(optimized_path_topic_, 20);
-    pub_optimized_keyframes_ = create_publisher<fast_lio::msg::OptimizedKeyframes>(
-      optimized_keyframes_topic_, rclcpp::QoS(1).transient_local());
-    pub_optimized_map_ = create_publisher<sensor_msgs::msg::PointCloud2>(optimized_map_topic_, 5);
-    pub_optimized_odom_ = create_publisher<nav_msgs::msg::Odometry>(optimized_odom_topic_, 10);
-    pub_map_to_odom_ = create_publisher<geometry_msgs::msg::TransformStamped>(
-      map_to_odom_topic_, rclcpp::QoS(1).transient_local());
-    pub_loop_markers_ = create_publisher<visualization_msgs::msg::MarkerArray>(loop_marker_topic_, 5);
-    pub_loop_candidate_current_ = create_publisher<sensor_msgs::msg::PointCloud2>(loop_candidate_current_topic_, 5);
-    pub_loop_candidate_history_ = create_publisher<sensor_msgs::msg::PointCloud2>(loop_candidate_history_topic_, 5);
-    pub_loop_candidate_registered_ = create_publisher<sensor_msgs::msg::PointCloud2>(loop_candidate_registered_topic_, 5);
+    if (frontend_feedback_enable_) {
+      pub_keyframe_id_ = create_publisher<std_msgs::msg::UInt32>(keyframe_id_topic_, 20);
+      pub_optimized_keyframes_ = create_publisher<fast_lio::msg::OptimizedKeyframes>(
+        optimized_keyframes_topic_, rclcpp::QoS(1).transient_local());
+    } else {
+      pub_map_to_odom_ = create_publisher<geometry_msgs::msg::TransformStamped>(
+        map_to_odom_topic_, rclcpp::QoS(1).transient_local());
+    }
 
     const auto loop_period = std::chrono::duration<double>(1.0 / std::max(0.1, loop_closure_frequency_));
     loop_timer_ = create_wall_timer(
@@ -320,12 +292,9 @@ public:
       std::chrono::duration_cast<std::chrono::milliseconds>(icp_period),
       std::bind(&LoopClosureBackendNode::process_icp_queue, this));
 
-    const auto map_period = std::chrono::duration<double>(1.0 / std::max(0.1, map_publish_frequency_));
-    map_timer_ = create_wall_timer(
-      std::chrono::duration_cast<std::chrono::milliseconds>(map_period),
-      std::bind(&LoopClosureBackendNode::publish_maps, this));
-
-    publish_map_to_odom_identity();
+    if (!frontend_feedback_enable_) {
+      publish_map_to_odom_identity();
+    }
   }
 
 private:
@@ -366,7 +335,6 @@ private:
     if (!msg->header.frame_id.empty() && msg->header.frame_id != odom_frame_) {
       std::lock_guard<std::mutex> lock(mutex_);
       odom_frame_ = msg->header.frame_id;
-      keyframe_path_.header.frame_id = odom_frame_;
     }
 
     const Pose6D pose = pose_from_msg(msg->pose_in_odom);
@@ -416,21 +384,13 @@ private:
     keyframe.cloud_body = cloud_body_ds;
     keyframes_.push_back(keyframe);
 
-    geometry_msgs::msg::PoseStamped pose_stamped;
-    pose_stamped.header = msg.header;
-    pose_stamped.header.frame_id = odom_frame_;
-    pose_stamped.pose = msg.pose_in_odom;
-    keyframe_path_.header.stamp = pose_stamped.header.stamp;
-    keyframe_path_.poses.push_back(pose_stamped);
-    pub_keyframe_path_->publish(keyframe_path_);
-
-    std_msgs::msg::UInt32 keyframe_id_msg;
-    keyframe_id_msg.data = msg.scan_id;
-    pub_keyframe_id_->publish(keyframe_id_msg);
+    if (pub_keyframe_id_) {
+      std_msgs::msg::UInt32 keyframe_id_msg;
+      keyframe_id_msg.data = msg.scan_id;
+      pub_keyframe_id_->publish(keyframe_id_msg);
+    }
 
     add_pose_graph_keyframe_locked();
-    publish_loop_markers_locked();
-
   }
 
   void add_pose_graph_keyframe_locked()
@@ -454,10 +414,10 @@ private:
     }
 
     run_isam2_locked();
-    publish_optimized_path_locked();
     publish_optimized_keyframes_locked();
-    publish_optimized_odom_locked();
-    publish_map_to_odom_locked();
+    if (!frontend_feedback_enable_) {
+      publish_map_to_odom_locked();
+    }
   }
 
   void run_isam2_locked()
@@ -497,7 +457,6 @@ private:
     if (pending_loop_index_container_.count(current_idx) > 0 ||
       accepted_loop_index_container_.count(current_idx) > 0)
     {
-      publish_loop_markers_locked();
       return;
     }
 
@@ -531,20 +490,11 @@ private:
     }
 
     if (selected_idx < 0) {
-      publish_loop_markers_locked();
       return;
     }
 
     pending_loop_index_container_[current_idx] = static_cast<std::size_t>(selected_idx);
     loop_icp_queue_.push_back(std::make_pair(static_cast<std::size_t>(selected_idx), current_idx));
-    publish_loop_candidate_clouds_locked(static_cast<std::size_t>(selected_idx), current_idx);
-    publish_loop_markers_locked();
-
-    const Pose6D history_pose = keyframes_[static_cast<std::size_t>(selected_idx)].raw_pose;
-    const Pose6D current_pose = keyframes_[current_idx].raw_pose;
-    const Pose6D delta = diff_pose(history_pose, current_pose);
-    const double loop_distance = pose_translation_norm(delta);
-
   }
 
   pcl::PointCloud<PointType>::Ptr build_nearby_cloud_locked(std::size_t root_idx, int search_num) const
@@ -576,15 +526,6 @@ private:
     downsampler.setInputCloud(near_keyframes);
     downsampler.filter(*near_keyframes_ds);
     return near_keyframes_ds;
-  }
-
-  void publish_loop_candidate_clouds_locked(std::size_t history_idx, std::size_t current_idx)
-  {
-    pcl::PointCloud<PointType>::Ptr current_cloud = build_nearby_cloud_locked(current_idx, 0);
-    pcl::PointCloud<PointType>::Ptr history_cloud = build_nearby_cloud_locked(history_idx, history_keyframe_search_num_);
-    const builtin_interfaces::msg::Time stamp = keyframes_[current_idx].stamp;
-    publish_pointcloud(pub_loop_candidate_current_, current_cloud, stamp, map_frame_);
-    publish_pointcloud(pub_loop_candidate_history_, history_cloud, stamp, map_frame_);
   }
 
   IcpJob make_icp_job_locked(std::size_t history_idx, std::size_t current_idx) const
@@ -695,15 +636,11 @@ private:
     }
 
     IcpResult result = do_icp(job);
-    if (result.accepted) {
-      publish_pointcloud(pub_loop_candidate_registered_, result.registered_cloud, job.current_stamp, map_frame_);
-    }
 
     std::lock_guard<std::mutex> lock(mutex_);
     pending_loop_index_container_.erase(job.current_idx);
 
     if (!result.accepted || accepted_loop_index_container_.count(job.current_idx) > 0) {
-      publish_loop_markers_locked();
       return;
     }
 
@@ -715,28 +652,10 @@ private:
     accepted_loop_index_container_[job.current_idx] = job.history_idx;
 
     run_isam2_locked();
-    publish_optimized_path_locked();
     publish_optimized_keyframes_locked();
-    publish_optimized_odom_locked();
-    publish_loop_markers_locked();
-    publish_map_to_odom_locked();
-  }
-
-  void publish_pointcloud(
-    const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &publisher,
-    const pcl::PointCloud<PointType>::Ptr &cloud,
-    const builtin_interfaces::msg::Time &stamp,
-    const std::string &frame_id) const
-  {
-    if (!publisher || !cloud || cloud->empty()) {
-      return;
+    if (!frontend_feedback_enable_) {
+      publish_map_to_odom_locked();
     }
-
-    sensor_msgs::msg::PointCloud2 cloud_msg;
-    pcl::toROSMsg(*cloud, cloud_msg);
-    cloud_msg.header.stamp = stamp;
-    cloud_msg.header.frame_id = frame_id;
-    publisher->publish(cloud_msg);
   }
 
   builtin_interfaces::msg::Time node_now_msg() const
@@ -746,119 +665,6 @@ private:
     stamp.sec = static_cast<int32_t>(now_ns / 1000000000LL);
     stamp.nanosec = static_cast<uint32_t>(now_ns % 1000000000LL);
     return stamp;
-  }
-
-  void publish_loop_markers_locked()
-  {
-    visualization_msgs::msg::MarkerArray marker_array;
-    const builtin_interfaces::msg::Time marker_stamp =
-      keyframes_.empty() ? node_now_msg() : keyframes_.back().stamp;
-
-    visualization_msgs::msg::Marker clear_marker;
-    clear_marker.action = visualization_msgs::msg::Marker::DELETEALL;
-    marker_array.markers.push_back(clear_marker);
-
-    auto make_node_marker = [&](const std::string &ns, int id, float r, float g, float b) {
-      visualization_msgs::msg::Marker marker;
-      marker.header.stamp = marker_stamp;
-      marker.header.frame_id = map_frame_;
-      marker.ns = ns;
-      marker.id = id;
-      marker.type = visualization_msgs::msg::Marker::SPHERE_LIST;
-      marker.action = visualization_msgs::msg::Marker::ADD;
-      marker.pose.orientation.w = 1.0;
-      marker.scale.x = 0.25;
-      marker.scale.y = 0.25;
-      marker.scale.z = 0.25;
-      marker.color.r = r;
-      marker.color.g = g;
-      marker.color.b = b;
-      marker.color.a = 1.0f;
-      return marker;
-    };
-
-    auto make_edge_marker = [&](const std::string &ns, int id, float r, float g, float b) {
-      visualization_msgs::msg::Marker marker;
-      marker.header.stamp = marker_stamp;
-      marker.header.frame_id = map_frame_;
-      marker.ns = ns;
-      marker.id = id;
-      marker.type = visualization_msgs::msg::Marker::LINE_LIST;
-      marker.action = visualization_msgs::msg::Marker::ADD;
-      marker.pose.orientation.w = 1.0;
-      marker.scale.x = 0.08;
-      marker.color.r = r;
-      marker.color.g = g;
-      marker.color.b = b;
-      marker.color.a = 1.0f;
-      return marker;
-    };
-
-    visualization_msgs::msg::Marker pending_nodes = make_node_marker("pending_loop_nodes", 0, 0.0f, 0.8f, 1.0f);
-    visualization_msgs::msg::Marker pending_edges = make_edge_marker("pending_loop_edges", 1, 0.0f, 0.8f, 1.0f);
-    for (const auto &entry : pending_loop_index_container_) {
-      const Pose6D cur_pose = get_pose_locked(entry.first, true);
-      const Pose6D pre_pose = get_pose_locked(entry.second, true);
-      geometry_msgs::msg::Point p_cur;
-      p_cur.x = cur_pose.x;
-      p_cur.y = cur_pose.y;
-      p_cur.z = cur_pose.z;
-      geometry_msgs::msg::Point p_pre;
-      p_pre.x = pre_pose.x;
-      p_pre.y = pre_pose.y;
-      p_pre.z = pre_pose.z;
-      pending_nodes.points.push_back(p_cur);
-      pending_nodes.points.push_back(p_pre);
-      pending_edges.points.push_back(p_cur);
-      pending_edges.points.push_back(p_pre);
-    }
-
-    visualization_msgs::msg::Marker accepted_nodes = make_node_marker("accepted_loop_nodes", 2, 0.95f, 0.85f, 0.05f);
-    visualization_msgs::msg::Marker accepted_edges = make_edge_marker("accepted_loop_edges", 3, 0.95f, 0.85f, 0.05f);
-    for (const auto &entry : accepted_loop_index_container_) {
-      const Pose6D cur_pose = get_pose_locked(entry.first, true);
-      const Pose6D pre_pose = get_pose_locked(entry.second, true);
-      geometry_msgs::msg::Point p_cur;
-      p_cur.x = cur_pose.x;
-      p_cur.y = cur_pose.y;
-      p_cur.z = cur_pose.z;
-      geometry_msgs::msg::Point p_pre;
-      p_pre.x = pre_pose.x;
-      p_pre.y = pre_pose.y;
-      p_pre.z = pre_pose.z;
-      accepted_nodes.points.push_back(p_cur);
-      accepted_nodes.points.push_back(p_pre);
-      accepted_edges.points.push_back(p_cur);
-      accepted_edges.points.push_back(p_pre);
-    }
-
-    marker_array.markers.push_back(pending_nodes);
-    marker_array.markers.push_back(pending_edges);
-    marker_array.markers.push_back(accepted_nodes);
-    marker_array.markers.push_back(accepted_edges);
-    pub_loop_markers_->publish(marker_array);
-  }
-
-  void publish_optimized_path_locked()
-  {
-    if (optimized_poses_.empty()) {
-      return;
-    }
-
-    optimized_path_.header.frame_id = map_frame_;
-    optimized_path_.header.stamp = keyframes_.back().stamp;
-    optimized_path_.poses.clear();
-    optimized_path_.poses.reserve(optimized_poses_.size());
-
-    for (std::size_t idx = 0; idx < optimized_poses_.size(); ++idx) {
-      geometry_msgs::msg::PoseStamped pose_stamped;
-      pose_stamped.header.frame_id = map_frame_;
-      pose_stamped.header.stamp = keyframes_[idx].stamp;
-      pose_stamped.pose = pose_to_msg(optimized_poses_[idx]);
-      optimized_path_.poses.push_back(pose_stamped);
-    }
-
-    pub_optimized_path_->publish(optimized_path_);
   }
 
   void publish_optimized_keyframes_locked()
@@ -881,75 +687,6 @@ private:
       msg.poses_in_map.push_back(pose_to_msg(optimized_poses_[idx]));
     }
     pub_optimized_keyframes_->publish(msg);
-  }
-
-  void publish_optimized_odom_locked()
-  {
-    if (optimized_poses_.empty()) {
-      return;
-    }
-
-    const Pose6D &pose = optimized_poses_.back();
-    nav_msgs::msg::Odometry odom_msg;
-    odom_msg.header.stamp = keyframes_.back().stamp;
-    odom_msg.header.frame_id = map_frame_;
-    odom_msg.child_frame_id = optimized_child_frame_;
-    odom_msg.pose.pose = pose_to_msg(pose);
-    pub_optimized_odom_->publish(odom_msg);
-  }
-
-  void publish_maps()
-  {
-    const bool have_raw_map_subscribers =
-      pub_keyframe_map_ &&
-      (pub_keyframe_map_->get_subscription_count() > 0);
-    const bool have_optimized_map_subscribers =
-      pub_optimized_map_ &&
-      (pub_optimized_map_->get_subscription_count() > 0);
-    if (!have_raw_map_subscribers && !have_optimized_map_subscribers) {
-      return;
-    }
-
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (keyframes_.empty()) {
-      return;
-    }
-
-    if (have_raw_map_subscribers) {
-      pcl::PointCloud<PointType>::Ptr raw_map(new pcl::PointCloud<PointType>());
-      for (const auto &keyframe : keyframes_) {
-        *raw_map += *transform_cloud(keyframe.cloud_body, keyframe.raw_pose);
-      }
-
-      pcl::VoxelGrid<PointType> downsampler;
-      downsampler.setLeafSize(
-        static_cast<float>(map_downsample_leaf_),
-        static_cast<float>(map_downsample_leaf_),
-        static_cast<float>(map_downsample_leaf_));
-      pcl::PointCloud<PointType>::Ptr raw_map_ds(new pcl::PointCloud<PointType>());
-      downsampler.setInputCloud(raw_map);
-      downsampler.filter(*raw_map_ds);
-      publish_pointcloud(pub_keyframe_map_, raw_map_ds, keyframes_.back().stamp, odom_frame_);
-    }
-
-    if (!have_optimized_map_subscribers || optimized_poses_.size() != keyframes_.size()) {
-      return;
-    }
-
-    pcl::PointCloud<PointType>::Ptr optimized_map(new pcl::PointCloud<PointType>());
-    for (std::size_t idx = 0; idx < keyframes_.size(); ++idx) {
-      *optimized_map += *transform_cloud(keyframes_[idx].cloud_body, optimized_poses_[idx]);
-    }
-
-    pcl::VoxelGrid<PointType> downsampler;
-    downsampler.setLeafSize(
-      static_cast<float>(map_downsample_leaf_),
-      static_cast<float>(map_downsample_leaf_),
-      static_cast<float>(map_downsample_leaf_));
-    pcl::PointCloud<PointType>::Ptr optimized_map_ds(new pcl::PointCloud<PointType>());
-    downsampler.setInputCloud(optimized_map);
-    downsampler.filter(*optimized_map_ds);
-    publish_pointcloud(pub_optimized_map_, optimized_map_ds, keyframes_.back().stamp, map_frame_);
   }
 
   void publish_map_to_odom_identity()
@@ -1003,22 +740,13 @@ private:
   }
 
   bool enabled_ = false;
+  bool frontend_feedback_enable_ = false;
   std::string map_frame_;
   std::string frontend_frame_topic_;
   std::string keyframe_id_topic_;
-  std::string keyframe_path_topic_;
-  std::string keyframe_map_topic_;
-  std::string optimized_path_topic_;
   std::string optimized_keyframes_topic_;
-  std::string optimized_map_topic_;
-  std::string optimized_odom_topic_;
   std::string map_to_odom_topic_;
-  std::string loop_marker_topic_;
-  std::string loop_candidate_current_topic_;
-  std::string loop_candidate_history_topic_;
-  std::string loop_candidate_registered_topic_;
   std::string odom_frame_;
-  std::string optimized_child_frame_;
 
   double keyframe_meter_gap_ = 1.0;
   double keyframe_deg_gap_ = 10.0;
@@ -1028,7 +756,6 @@ private:
   int history_keyframe_search_num_ = 10;
   double loop_closure_frequency_ = 2.0;
   double icp_process_frequency_ = 1.0;
-  double map_publish_frequency_ = 0.5;
   double keyframe_downsample_leaf_ = 0.4;
   double map_downsample_leaf_ = 0.4;
   double icp_max_correspondence_distance_ = 15.0;
@@ -1043,8 +770,6 @@ private:
   std::mutex mutex_;
   std::vector<KeyframeData> keyframes_;
   std::vector<Pose6D> optimized_poses_;
-  nav_msgs::msg::Path keyframe_path_;
-  nav_msgs::msg::Path optimized_path_;
   std::map<std::size_t, std::size_t> pending_loop_index_container_;
   std::map<std::size_t, std::size_t> accepted_loop_index_container_;
   std::deque<std::pair<std::size_t, std::size_t>> loop_icp_queue_;
@@ -1065,21 +790,11 @@ private:
 
   rclcpp::Subscription<fast_lio::msg::FrontendFrame>::SharedPtr sub_frontend_frame_;
   rclcpp::Publisher<std_msgs::msg::UInt32>::SharedPtr pub_keyframe_id_;
-  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_keyframe_path_;
-  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_keyframe_map_;
-  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_optimized_path_;
   rclcpp::Publisher<fast_lio::msg::OptimizedKeyframes>::SharedPtr pub_optimized_keyframes_;
-  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_optimized_map_;
-  rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_optimized_odom_;
   rclcpp::Publisher<geometry_msgs::msg::TransformStamped>::SharedPtr pub_map_to_odom_;
-  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pub_loop_markers_;
-  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_loop_candidate_current_;
-  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_loop_candidate_history_;
-  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_loop_candidate_registered_;
 
   rclcpp::TimerBase::SharedPtr loop_timer_;
   rclcpp::TimerBase::SharedPtr icp_timer_;
-  rclcpp::TimerBase::SharedPtr map_timer_;
 };
 
 int main(int argc, char **argv)

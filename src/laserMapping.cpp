@@ -2013,12 +2013,6 @@ public:
                 loop_closure_map_to_odom_tf.transform.rotation.w = 1.0;
                 loop_closure_map_to_odom_available = true;
             }
-            auto map_to_odom_qos = rclcpp::QoS(1).transient_local();
-            sub_loop_closure_map_to_odom_ =
-                this->create_subscription<geometry_msgs::msg::TransformStamped>(
-                    loop_closure_map_to_odom_topic,
-                    map_to_odom_qos,
-                    loop_closure_map_to_odom_cbk);
             if (loop_closure_frontend_feedback_enable)
             {
                 sub_loop_closure_keyframe_id_ =
@@ -2032,6 +2026,15 @@ public:
                         rclcpp::QoS(1).transient_local(),
                         loop_closure_optimized_keyframes_cbk);
                 reset_loop_closure_map_to_odom_identity();
+            }
+            else
+            {
+                auto map_to_odom_qos = rclcpp::QoS(1).transient_local();
+                sub_loop_closure_map_to_odom_ =
+                    this->create_subscription<geometry_msgs::msg::TransformStamped>(
+                        loop_closure_map_to_odom_topic,
+                        map_to_odom_qos,
+                        loop_closure_map_to_odom_cbk);
             }
         }
     tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
