@@ -48,14 +48,7 @@ def generate_launch_description():
         executable='fastlio_mapping',
         parameters=[PathJoinSubstitution([config_path, config_file]),
                     {'use_sim_time': use_sim_time}],
-        output='screen',
-        # Raise log level for main nodes; adjust as needed (debug/info/warn/error)
-        arguments=[
-            '--ros-args',
-            '--log-level', 'laser_mapping:=debug',
-            '--log-level', 'fast_lio.preprocess:=debug',
-            '--log-level', 'fast_lio.gpu:=debug'
-        ]
+        output='screen'
     )
     rviz_node = Node(
         package='rviz2',
