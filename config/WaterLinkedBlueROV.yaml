@@ -76,12 +76,13 @@
             body_frame: "body"
 
         publish:
-            path_en:  true
-            scan_publish_en:  true       # false: close all the point cloud output
-            dense_publish_en: true      # false: low down the points number in a global-frame point clouds scan.
+            path_en:  false
+            scan_publish_en:  false       # false: close all the point cloud output
+            dense_publish_en: false      # false: low down the points number in a global-frame point clouds scan.
             scan_bodyframe_pub_en: false  # true: output the point cloud scans in IMU-body-frame
             blind_max: 15.0               # max range [m] for published registered clouds; <=0 disables max cutoff
-            map_en: true                # enable map accumulation so /map_save writes a populated PCD
+            map_en: false               # enable map accumulation so /map_save writes a populated PCD
+            imu_driven_propagation: true # publish /Odometry from IMU/DVL/pressure when LiDAR scans are missing
 
         map_file_path: "/home/attia/bags/fastlio_map.pcd"
         pcd_save:

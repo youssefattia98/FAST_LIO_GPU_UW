@@ -52,6 +52,7 @@ class ImuProcess
   void set_dvl_params(double cov_floor_std, double min_speed);
   void set_dvl_hold(bool enable, double max_age_sec);
   void set_process_noise(const V3D &nv, const V3D &nw, const V3D &nbg, const V3D &nba, const V3D &nb_dvl, double nb_pressure);
+  bool Initialized() const { return !imu_need_init_; }
   Eigen::Matrix<double, process_noise_ikfom::DOF, process_noise_ikfom::DOF> Q;
   void Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, process_noise_ikfom::DOF, input_ikfom> &kf_state, PointCloudXYZI::Ptr pcl_un_);
 
@@ -107,7 +108,7 @@ class ImuProcess
 };
 
 ImuProcess::ImuProcess()
-    : b_first_frame_(true), imu_need_init_(true), start_timestamp_(-1)
+    : b_first_frame_(true), imu_need_init_(true), start_timestamp_(-1), last_lidar_end_time_(-1.0)
 {
   init_iter_num = 1;
   Q = process_noise_cov();
@@ -144,6 +145,7 @@ void ImuProcess::Reset()
   IMUpose.clear();
   last_imu_.reset(new sensor_msgs::msg::Imu());
   cur_pcl_un_.reset(new PointCloudXYZI());
+  last_lidar_end_time_ = -1.0;
   last_dvl_hold_sample_.valid = false;
   last_dvl_hold_sample_.stamp = 0.0;
   last_dvl_hold_sample_.vel.setZero();
@@ -296,6 +298,22 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
   /*** sort point clouds by offset time ***/
   pcl_out = *(meas.lidar);
   sort(pcl_out.points.begin(), pcl_out.points.end(), time_list);
+  const double overlap_prefix_sec = std::max(0.0, last_lidar_end_time_ - pcl_beg_time);
+  if (overlap_prefix_sec > 0.0 && !pcl_out.points.empty())
+  {
+    const double overlap_prefix_ms = overlap_prefix_sec * 1000.0;
+    auto first_unprocessed = std::lower_bound(
+        pcl_out.points.begin(),
+        pcl_out.points.end(),
+        overlap_prefix_ms,
+        [](const PointType &point, const double offset_ms) {
+          return point.curvature < offset_ms;
+        });
+    if (first_unprocessed != pcl_out.points.begin())
+    {
+      pcl_out.points.erase(pcl_out.points.begin(), first_unprocessed);
+    }
+  }
   // cout<<"[ IMU Process ]: Process lidar from "<<pcl_beg_time<<" to "<<pcl_end_time<<", " \
   //          <<meas.imu.size()<<" imu msgs from "<<imu_beg_time<<" to "<<imu_end_time<<endl;
 
@@ -352,7 +370,7 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
   state_ikfom imu_state = kf_state.get_x();
   IMUpose.clear();
   V3D vel_world_init = imu_state.rot * imu_state.vel;
-  IMUpose.push_back(set_pose6d(0.0, acc_s_last, angvel_last, vel_world_init, imu_state.pos, imu_state.rot.toRotationMatrix()));
+  IMUpose.push_back(set_pose6d(overlap_prefix_sec, acc_s_last, angvel_last, vel_world_init, imu_state.pos, imu_state.rot.toRotationMatrix()));
 
   /*** forward propagation at each imu point ***/
   V3D angvel_avr, acc_avr, acc_imu, vel_imu, pos_imu;
@@ -645,6 +663,11 @@ void ImuProcess::Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 
   double t1,t2,t3;
   t1 = omp_get_wtime();
 
+  if (cur_pcl_un_)
+  {
+    cur_pcl_un_->clear();
+  }
+
   if(meas.imu.empty()) {return;};
   assert(meas.lidar != nullptr);
 
@@ -656,6 +679,7 @@ void ImuProcess::Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 
     imu_need_init_ = true;
     
     last_imu_   = meas.imu.back();
+    last_lidar_end_time_ = meas.lidar_end_time;
 
     state_ikfom imu_state = kf_state.get_x();
     if (init_iter_num > MAX_INI_COUNT)
