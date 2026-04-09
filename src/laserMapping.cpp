@@ -131,6 +131,7 @@ int    iterCount = 0, feats_down_size = 0, NUM_MAX_ITERATIONS = 0, laserCloudVal
 bool   point_selected_surf[100000] = {0};
 bool   lidar_pushed, flg_first_scan = true, flg_exit = false, flg_EKF_inited;
 bool   scan_pub_en = false, dense_pub_en = false, scan_body_pub_en = false;
+bool   imu_driven_propagation = false;
 double publish_blind_max = 0.0;
 bool    is_first_lidar = true;
 bool    dvl_enabled = false;
@@ -509,6 +510,28 @@ void pressure_cbk(const sensor_msgs::msg::FluidPressure::UniquePtr msg_in)
 
 double lidar_mean_scantime = 0.0;
 int    scan_num = 0;
+
+template <typename BufferT, typename StampFn>
+void collect_measurement_window(BufferT &buffer, BufferT &output, double sensor_window_start, double sensor_window_end, StampFn stamp_fn)
+{
+    output.clear();
+    while (!buffer.empty())
+    {
+        const double stamp = stamp_fn(buffer.front());
+        if (stamp <= sensor_window_start)
+        {
+            buffer.pop_front();
+            continue;
+        }
+        if (stamp > sensor_window_end)
+        {
+            break;
+        }
+        output.push_back(buffer.front());
+        buffer.pop_front();
+    }
+}
+
 bool sync_packages(MeasureGroup &meas)
 {
     std::lock_guard<std::mutex> lock(mtx_buffer);
@@ -553,82 +576,80 @@ bool sync_packages(MeasureGroup &meas)
         ? meas.prev_lidar_end_time
         : -std::numeric_limits<double>::infinity();
 
-    /*** push imu data, and pop from imu buffer ***/
-    meas.imu.clear();
-    while (!imu_buffer.empty())
-    {
-        const double imu_time = get_time_sec(imu_buffer.front()->header.stamp);
-        if (imu_time <= sensor_window_start)
-        {
-            imu_buffer.pop_front();
-            continue;
-        }
-        if (imu_time > lidar_end_time)
-        {
-            break;
-        }
-        meas.imu.push_back(imu_buffer.front());
-        imu_buffer.pop_front();
-    }
-
-    /*** push thruster data, and pop from thruster buffer ***/
-    meas.thruster_forces.clear();
-    while (!thruster_buffer.empty())
-    {
-        double thruster_time = get_time_sec(thruster_buffer.front()->header.stamp);
-        if (thruster_time <= sensor_window_start)
-        {
-            thruster_buffer.pop_front();
-            continue;
-        }
-        if (thruster_time > lidar_end_time)
-        {
-            break;
-        }
-        meas.thruster_forces.push_back(thruster_buffer.front());
-        thruster_buffer.pop_front();
-    }
-
-    /*** push DVL data, and pop from DVL buffer ***/
-    meas.dvl.clear();
-    while (!dvl_buffer.empty())
-    {
-        double dvl_time = get_time_sec(dvl_buffer.front()->header.stamp);
-        if (dvl_time <= sensor_window_start)
-        {
-            dvl_buffer.pop_front();
-            continue;
-        }
-        if (dvl_time > lidar_end_time)
-        {
-            break;
-        }
-        meas.dvl.push_back(dvl_buffer.front());
-        dvl_buffer.pop_front();
-    }
-
-    /*** push pressure data, and pop from pressure buffer ***/
-    meas.pressure.clear();
-    while (!pressure_buffer.empty())
-    {
-        double pressure_time = get_time_sec(pressure_buffer.front()->header.stamp);
-        if (pressure_time <= sensor_window_start)
-        {
-            pressure_buffer.pop_front();
-            continue;
-        }
-        if (pressure_time > lidar_end_time)
-        {
-            break;
-        }
-        meas.pressure.push_back(pressure_buffer.front());
-        pressure_buffer.pop_front();
-    }
+    collect_measurement_window(imu_buffer, meas.imu, sensor_window_start, lidar_end_time,
+                               [](const auto &msg) { return get_time_sec(msg->header.stamp); });
+    collect_measurement_window(thruster_buffer, meas.thruster_forces, sensor_window_start, lidar_end_time,
+                               [](const auto &msg) { return get_time_sec(msg->header.stamp); });
+    collect_measurement_window(dvl_buffer, meas.dvl, sensor_window_start, lidar_end_time,
+                               [](const auto &msg) { return get_time_sec(msg->header.stamp); });
+    collect_measurement_window(pressure_buffer, meas.pressure, sensor_window_start, lidar_end_time,
+                               [](const auto &msg) { return get_time_sec(msg->header.stamp); });
 
     lidar_buffer.pop_front();
     time_buffer.pop_front();
     lidar_pushed = false;
     last_sync_lidar_end_time = lidar_end_time;
+    return true;
+}
+
+bool sync_predict_only(MeasureGroup &meas)
+{
+    std::lock_guard<std::mutex> lock(mtx_buffer);
+
+    if (!imu_driven_propagation || imu_buffer.empty())
+    {
+        return false;
+    }
+
+    if (!lidar_buffer.empty())
+    {
+        return false;
+    }
+
+    const bool lidar_ever_received = !is_first_lidar;
+    const double expected_scan_period = lidar_mean_scantime > 1e-3
+        ? lidar_mean_scantime
+        : ((p_pre && p_pre->SCAN_RATE > 0) ? 1.0 / static_cast<double>(p_pre->SCAN_RATE) : 0.1);
+    double propagation_guard_time = 0.0;
+    if (lidar_ever_received)
+    {
+        propagation_guard_time = expected_scan_period;
+        const double dropout_trigger_time = last_timestamp_lidar + expected_scan_period;
+        if (!(last_timestamp_imu > dropout_trigger_time))
+        {
+            return false;
+        }
+    }
+
+    const double sensor_window_start = std::isfinite(last_sync_lidar_end_time)
+        ? last_sync_lidar_end_time
+        : get_time_sec(imu_buffer.front()->header.stamp);
+    const double propagation_end_time = last_timestamp_imu - propagation_guard_time;
+    if (!(propagation_end_time > sensor_window_start))
+    {
+        return false;
+    }
+
+    meas.lidar->clear();
+    meas.lidar_beg_time = sensor_window_start;
+    meas.lidar_end_time = propagation_end_time;
+    meas.prev_lidar_end_time = last_sync_lidar_end_time;
+    lidar_end_time = propagation_end_time;
+
+    collect_measurement_window(imu_buffer, meas.imu, sensor_window_start, propagation_end_time,
+                               [](const auto &msg) { return get_time_sec(msg->header.stamp); });
+    if (meas.imu.empty())
+    {
+        return false;
+    }
+    collect_measurement_window(thruster_buffer, meas.thruster_forces, sensor_window_start, propagation_end_time,
+                               [](const auto &msg) { return get_time_sec(msg->header.stamp); });
+    collect_measurement_window(dvl_buffer, meas.dvl, sensor_window_start, propagation_end_time,
+                               [](const auto &msg) { return get_time_sec(msg->header.stamp); });
+    collect_measurement_window(pressure_buffer, meas.pressure, sensor_window_start, propagation_end_time,
+                               [](const auto &msg) { return get_time_sec(msg->header.stamp); });
+
+    last_sync_lidar_end_time = propagation_end_time;
     return true;
 }
 
@@ -959,6 +980,17 @@ void set_posestamp(T & out)
     
 }
 
+void refresh_state_cache()
+{
+    state_point = kf.get_x();
+    pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
+    euler_cur = SO3ToEuler(state_point.rot);
+    geoQuat.x = state_point.rot.coeffs()[0];
+    geoQuat.y = state_point.rot.coeffs()[1];
+    geoQuat.z = state_point.rot.coeffs()[2];
+    geoQuat.w = state_point.rot.coeffs()[3];
+}
+
 void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped, std::unique_ptr<tf2_ros::TransformBroadcaster> & tf_br)
 {
     odomAftMapped.header.frame_id = odom_frame_id;
@@ -1183,6 +1215,7 @@ public:
         this->declare_parameter<bool>("publish.scan_publish_en", true);
         this->declare_parameter<bool>("publish.dense_publish_en", true);
         this->declare_parameter<bool>("publish.scan_bodyframe_pub_en", true);
+        this->declare_parameter<bool>("publish.imu_driven_propagation", false);
         this->declare_parameter<double>("publish.blind_max", 0.0);
         this->declare_parameter<int>("max_iteration", 4);
         this->declare_parameter<string>("map_file_path", "");
@@ -1249,6 +1282,7 @@ public:
         this->get_parameter_or<bool>("publish.scan_publish_en", scan_pub_en, true);
         this->get_parameter_or<bool>("publish.dense_publish_en", dense_pub_en, true);
         this->get_parameter_or<bool>("publish.scan_bodyframe_pub_en", scan_body_pub_en, true);
+        this->get_parameter_or<bool>("publish.imu_driven_propagation", imu_driven_propagation, false);
         this->get_parameter_or<double>("publish.blind_max", publish_blind_max, 0.0);
         this->get_parameter_or<int>("max_iteration", NUM_MAX_ITERATIONS, 4);
         this->get_parameter_or<string>("map_file_path", map_file_path, "");
@@ -1536,14 +1570,24 @@ public:
 
     void process_available_scans()
     {
-        while(sync_packages(Measures))
+        while (true)
         {
+            const bool has_lidar_window = sync_packages(Measures);
+            const bool prediction_only_window = !has_lidar_window && sync_predict_only(Measures);
+            if (!has_lidar_window && !prediction_only_window)
+            {
+                break;
+            }
+
             if (flg_first_scan)
             {
                 first_lidar_time = Measures.lidar_beg_time;
                 p_imu->first_lidar_time = first_lidar_time;
                 flg_first_scan = false;
-                return;
+                if (has_lidar_window)
+                {
+                    continue;
+                }
             }
 
             double t0,t1,t2,t3,t5;
@@ -1561,6 +1605,11 @@ public:
             kdtree_incremental_time = 0.0;
 
             p_imu->Process(Measures, kf, feats_undistort);
+
+            if (!p_imu->Initialized())
+            {
+                continue;
+            }
 
             if (pressure_enabled && !Measures.pressure.empty())
             {
@@ -1604,13 +1653,26 @@ public:
                 }
             }
 
-            state_point = kf.get_x();
-            pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
+            refresh_state_cache();
 
-            if (feats_undistort->empty() || (feats_undistort == NULL))
+            if (!feats_undistort || feats_undistort->empty())
             {
-                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000, "No point, skip this scan!");
-                return;
+                if (prediction_only_window)
+                {
+                    RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                                          "Publishing propagated odometry without a LiDAR scan.");
+                }
+                else
+                {
+                    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                                         "No LiDAR points in this window, publishing propagated odometry only.");
+                }
+                publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
+                if (path_en)
+                {
+                    publish_path(pubPath_);
+                }
+                continue;
             }
 
             flg_EKF_inited = (Measures.lidar_beg_time - first_lidar_time) < INIT_TIME ? \
@@ -1661,7 +1723,12 @@ public:
                     }
                     ikdtree.Build(feats_down_world->points);
                 }
-                return;
+                publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
+                if (path_en)
+                {
+                    publish_path(pubPath_);
+                }
+                continue;
             }
             int featsFromMapNum = ikdtree.validnum();
             kdtree_size_st = ikdtree.size();
@@ -1671,8 +1738,14 @@ public:
             /*** ICP and iterated Kalman filter update ***/
             if (feats_down_size < 5)
             {
-                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000, "No point, skip this scan!");
-                return;
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                                     "Too few downsampled points for LiDAR correction, publishing propagated odometry only.");
+                publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
+                if (path_en)
+                {
+                    publish_path(pubPath_);
+                }
+                continue;
             }
             
             normvec->resize(feats_down_size);
@@ -1711,13 +1784,7 @@ public:
             double t_update_start = omp_get_wtime();
             double solve_H_time = 0;
             kf.update_iterated_dyn_share_modified(LASER_POINT_COV, solve_H_time);
-            state_point = kf.get_x();
-            euler_cur = SO3ToEuler(state_point.rot);
-            pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
-            geoQuat.x = state_point.rot.coeffs()[0];
-            geoQuat.y = state_point.rot.coeffs()[1];
-            geoQuat.z = state_point.rot.coeffs()[2];
-            geoQuat.w = state_point.rot.coeffs()[3];
+            refresh_state_cache();
 
             double t_update_end = omp_get_wtime();
 

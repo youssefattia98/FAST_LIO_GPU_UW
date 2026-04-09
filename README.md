@@ -165,6 +165,23 @@ frames:
 
 Set `body_frame` to the robot's `base_link` (or IMU frame) to remove RViz warnings such as “No transform from [base_link] to [camera_init]”. If you keep the default names, FAST-LIO will continue to behave exactly as before.
 
+### Dead-Reckoning Through LiDAR Dropouts
+If your LiDAR occasionally returns no scan at all, or a scan with too few usable points, you can keep `/Odometry` alive from IMU plus auxiliary sensors until LiDAR comes back:
+
+```yaml
+publish:
+    imu_driven_propagation: true
+```
+
+With that flag enabled, FAST-LIO will:
+
+- keep propagating the IKF state from IMU windows even when no LiDAR frame is ready
+- still apply DVL / pressure updates inside those propagation-only windows
+- publish propagated `/Odometry` and `/path` without touching the map
+- resume scan-to-map updates as soon as LiDAR points return
+
+When the first returning LiDAR scan overlaps time that was already propagated in IMU-only mode, FAST-LIO now drops the already-consumed prefix of that scan before undistortion. That avoids double-integrating the same motion window, but it also means the first scan after a long dropout may contribute fewer points than usual.
+
 Launch livox ros driver. Use MID360 as an example.
 
 ```bash
