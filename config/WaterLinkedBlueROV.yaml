@@ -9,10 +9,17 @@
         runtime_pos_log_enable: false # true writes pose log to disk; false disables logging
         common:
             lid_topic:  "/IsaacSim/rtx_lidar/point_cloud"
-            imu_topic:  "/IsaacSim/imu"
+            imu_topic:  "/IsaacSim/disabled_imu"
             time_sync_en: true        # ONLY turn on when external time synchronization is really not possible
             time_offset_lidar_to_imu: 0.0 # Time offset between lidar and IMU calibrated by other algorithms, e.g. LI-Init (can be found in README).
                                         # This param will take effect no matter what time_sync_en is. So if the time offset is not known exactly, please set as 0.0
+
+        imu:
+            accel_update_en: false # disable runtime accel "gravity correction" for simulator IMU; it can suppress real linear acceleration
+            accel_static_gate_mps2: 0.5
+            gyro_static_gate_rps: 0.35
+            gravity_mps2: 9.80665
+            normalize_accel_to_gravity: false # simulator IMU already reports physical units; do not renormalize it inside FAST-LIO
 
         preprocess:
             lidar_type: 5                # 1: Livox, 2: Velodyne, 3: Ouster, 4: Mid360, 5: WaterLinked solid-state
@@ -45,16 +52,17 @@
                 nb_pressure: 0.0001 # pressure-depth bias random-walk (m^2/s)
 
         dynamics:
-            enable: false
+            enable: true
             config_name: "BlueROV"  # model name used by the dynamics model internals
-            config_path: "/home/jetson/bluerov_ws/src/FAST_LIO_GPU_UW/config/BlueROV.conf"  # full path to libconfig .conf file
-            forces_topic: "/auv/forces_dedired"
+            config_path: "/home/attia/IsaacSim_Underwater/config/BlueROV.conf"  # use the exact same vehicle model file as Isaac Sim
+            forces_topic: "/auv/forces_desired_stamped" # stamped force mirror published by the simulator at physics rate
             model_trust: 1.0 # 1.0 = fully trust dynamics, 0.0 = ignore dynamics
-            thruster_meas_en: true    # use dynamics-based pseudo-accel as a measurement update
+            propagate_vel_omega_from_model: true # use MVM linear/angular acceleration to propagate body velocity and angular rate
+            thruster_meas_en: false   # avoid double-using the same model as both process and pseudo-measurement
             thruster_acc_cov: 1.0     # covariance for thruster-accel pseudo-measurement (m/s^2)^2
 
         dvl:
-            enable: true
+            enable: false
             topic: "/IsaacSim/dvl/odom"
             extrinsic_T: [ -0.079, -0.09691, -0.25938 ] # DVL_T_wrt_IMU in meters; from CAD model, but can be refined by extrinsic estimation if enabled
             extrinsic_R: [ 1., 0., 0.,

@@ -51,6 +51,8 @@ class ImuProcess
   void set_thruster_meas(bool enable, const V3D &cov);
   void set_dvl_params(double cov_floor_std, double min_speed);
   void set_dvl_hold(bool enable, double max_age_sec);
+  void set_imu_accel_update(bool enable, double static_accel_gate_mps2, double static_gyro_gate_rps);
+  void set_gravity_config(double gravity_mps2, bool normalize_accel_to_gravity);
   void set_process_noise(const V3D &nv, const V3D &nw, const V3D &nbg, const V3D &nba, const V3D &nb_dvl, double nb_pressure);
   bool Initialized() const { return !imu_need_init_; }
   Eigen::Matrix<double, process_noise_ikfom::DOF, process_noise_ikfom::DOF> Q;
@@ -72,6 +74,11 @@ class ImuProcess
   double dynamics_model_trust_ = 1.0;
   bool thruster_meas_en_ = false;
   V3D thruster_acc_cov_ = V3D(0.1, 0.1, 0.1);
+  bool imu_accel_update_en_ = true;
+  double imu_accel_static_gate_mps2_ = 0.5;
+  double imu_gyro_static_gate_rps_ = 0.35;
+  double gravity_mps2_ = G_m_s2;
+  bool normalize_accel_to_gravity_ = true;
   double dvl_cov_floor_std_ = 0.01;
   double dvl_min_speed_ = 0.0;
   bool dvl_hold_enabled_ = false;
@@ -79,6 +86,8 @@ class ImuProcess
   double first_lidar_time;
 
  private:
+  void InitializeWithoutImu(const MeasureGroup &meas, esekfom::esekf<state_ikfom, process_noise_ikfom::DOF, input_ikfom> &kf_state);
+  void PropagateWithDynamicsOnly(const MeasureGroup &meas, esekfom::esekf<state_ikfom, process_noise_ikfom::DOF, input_ikfom> &kf_state, PointCloudXYZI &pcl_out);
   void IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, process_noise_ikfom::DOF, input_ikfom> &kf_state, int &N);
   void UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikfom, process_noise_ikfom::DOF, input_ikfom> &kf_state, PointCloudXYZI &pcl_in_out);
 
@@ -223,6 +232,278 @@ void ImuProcess::set_dvl_hold(bool enable, double max_age_sec)
   dvl_hold_max_age_sec_ = std::max(0.0, max_age_sec);
 }
 
+void ImuProcess::set_imu_accel_update(bool enable, double static_accel_gate_mps2, double static_gyro_gate_rps)
+{
+  imu_accel_update_en_ = enable;
+  imu_accel_static_gate_mps2_ = std::max(0.0, static_accel_gate_mps2);
+  imu_gyro_static_gate_rps_ = std::max(0.0, static_gyro_gate_rps);
+}
+
+void ImuProcess::set_gravity_config(double gravity_mps2, bool normalize_accel_to_gravity)
+{
+  gravity_mps2_ = std::max(1e-6, gravity_mps2);
+  normalize_accel_to_gravity_ = normalize_accel_to_gravity;
+}
+
+void ImuProcess::InitializeWithoutImu(const MeasureGroup &meas,
+                                      esekfom::esekf<state_ikfom, process_noise_ikfom::DOF, input_ikfom> &kf_state)
+{
+  if (b_first_frame_)
+  {
+    Reset();
+    b_first_frame_ = false;
+    first_lidar_time = meas.lidar_beg_time;
+  }
+
+  state_ikfom init_state = kf_state.get_x();
+  init_state.grav = V3D(0.0, 0.0, -gravity_mps2_);
+  init_state.bg = Zero3d;
+  init_state.ba = Zero3d;
+  init_state.omega = Zero3d;
+  init_state.b_dvl = Zero3d;
+  init_state.b_pressure[0] = 0.0;
+  init_state.offset_T_L_I = Lidar_T_wrt_IMU;
+  init_state.offset_R_L_I = Lidar_R_wrt_IMU;
+  kf_state.change_x(init_state);
+
+  esekfom::esekf<state_ikfom, process_noise_ikfom::DOF, input_ikfom>::cov init_P = kf_state.get_P();
+  init_P.setIdentity();
+  init_P(6,6) = init_P(7,7) = init_P(8,8) = 0.00001;
+  init_P(9,9) = init_P(10,10) = init_P(11,11) = 0.00001;
+  init_P(15,15) = init_P(16,16) = init_P(17,17) = 0.0001;
+  init_P(18,18) = init_P(19,19) = init_P(20,20) = 0.001;
+  init_P(21,21) = init_P(22,22) = init_P(23,23) = 0.00001;
+  init_P(27,27) = init_P(28,28) = init_P(29,29) = 0.001;
+  init_P(30,30) = 4.0;
+  kf_state.change_P(init_P);
+
+  imu_need_init_ = false;
+  angvel_last = Zero3d;
+  acc_s_last = Zero3d;
+  last_lidar_end_time_ = std::isfinite(meas.prev_lidar_end_time) ? meas.prev_lidar_end_time : meas.lidar_beg_time;
+}
+
+void ImuProcess::PropagateWithDynamicsOnly(const MeasureGroup &meas,
+                                           esekfom::esekf<state_ikfom, process_noise_ikfom::DOF, input_ikfom> &kf_state,
+                                           PointCloudXYZI &pcl_out)
+{
+  const double &pcl_beg_time = meas.lidar_beg_time;
+  const double &pcl_end_time = meas.lidar_end_time;
+
+  pcl_out = *(meas.lidar);
+  sort(pcl_out.points.begin(), pcl_out.points.end(), time_list);
+  const double overlap_prefix_sec = std::max(0.0, last_lidar_end_time_ - pcl_beg_time);
+  if (overlap_prefix_sec > 0.0 && !pcl_out.points.empty())
+  {
+    const double overlap_prefix_ms = overlap_prefix_sec * 1000.0;
+    auto first_unprocessed = std::lower_bound(
+        pcl_out.points.begin(),
+        pcl_out.points.end(),
+        overlap_prefix_ms,
+        [](const PointType &point, const double offset_ms) {
+          return point.curvature < offset_ms;
+        });
+    if (first_unprocessed != pcl_out.points.begin())
+    {
+      pcl_out.points.erase(pcl_out.points.begin(), first_unprocessed);
+    }
+  }
+
+  struct ThrusterSample
+  {
+    double stamp = 0.0;
+    Eigen::VectorXd forces;
+  };
+  std::vector<ThrusterSample> thr_samples;
+  thr_samples.reserve(meas.thruster_forces.size());
+  for (const auto &thr_msg : meas.thruster_forces)
+  {
+    ThrusterSample sample;
+    sample.stamp = rclcpp::Time(thr_msg->header.stamp).seconds();
+    const auto &effort = thr_msg->effort;
+    sample.forces.resize(static_cast<long>(effort.size()));
+    for (size_t i = 0; i < effort.size(); ++i)
+    {
+      sample.forces(static_cast<long>(i)) = effort[i];
+    }
+    thr_samples.push_back(std::move(sample));
+  }
+
+  struct DvlSample
+  {
+    double stamp = 0.0;
+    Eigen::Vector3d vel = Eigen::Vector3d::Zero();
+  };
+  std::vector<DvlSample> dvl_samples;
+  dvl_samples.reserve(meas.dvl.size());
+  for (const auto &dvl_msg : meas.dvl)
+  {
+    const auto &lin = dvl_msg->twist.twist.linear;
+    if (!std::isfinite(lin.x) || !std::isfinite(lin.y) || !std::isfinite(lin.z))
+    {
+      continue;
+    }
+
+    DvlSample sample;
+    sample.stamp = rclcpp::Time(dvl_msg->header.stamp).seconds();
+    sample.vel = Eigen::Vector3d(lin.x, lin.y, lin.z);
+    dvl_samples.push_back(std::move(sample));
+  }
+
+  input_ikfom in;
+  in.acc = Zero3d;
+  in.gyro = Zero3d;
+  in.dyn_acc = Zero3d;
+  in.dyn_alpha = Zero3d;
+  in.dyn_valid[0] = 0.0;
+
+  auto apply_dvl_update = [&](const DvlSample &sample)
+  {
+    if (dvl_min_speed_ > 0.0 && sample.vel.norm() < dvl_min_speed_)
+    {
+      return;
+    }
+
+    const double floor_var = dvl_cov_floor_std_ * dvl_cov_floor_std_;
+    Eigen::Matrix3d R_dvl = Eigen::Matrix3d::Zero();
+    R_dvl.diagonal() << floor_var, floor_var, floor_var;
+    set_dvl_cov(R_dvl);
+
+    double z_arr[3] = {sample.vel(0), sample.vel(1), sample.vel(2)};
+    vect3 z_dvl(z_arr, 3);
+    kf_state.update_iterated_dyn_runtime_share(z_dvl, h_dvl_share);
+  };
+
+  size_t thr_idx = 0;
+  size_t dvl_idx = 0;
+  double current_time = std::isfinite(meas.prev_lidar_end_time) ? meas.prev_lidar_end_time : pcl_beg_time;
+  if (!std::isfinite(current_time))
+  {
+    current_time = pcl_beg_time;
+  }
+
+  while (thr_idx < thr_samples.size() && thr_samples[thr_idx].stamp <= current_time)
+  {
+    fastlio::dynamics::set_thruster_forces(thr_samples[thr_idx].forces);
+    ++thr_idx;
+  }
+  while (dvl_idx < dvl_samples.size() && dvl_samples[dvl_idx].stamp <= current_time)
+  {
+    last_dvl_hold_sample_.valid = true;
+    last_dvl_hold_sample_.stamp = dvl_samples[dvl_idx].stamp;
+    last_dvl_hold_sample_.vel = dvl_samples[dvl_idx].vel;
+    ++dvl_idx;
+  }
+
+  auto predict_segment = [&](double dt)
+  {
+    if (!(dt > 0.0))
+    {
+      return;
+    }
+
+    state_ikfom imu_state = kf_state.get_x();
+    V3D omega_body = imu_state.omega;
+    V3D vel_body = imu_state.vel;
+
+    Eigen::Matrix<double, 6, 1> vel_body6;
+    vel_body6 << vel_body(0), vel_body(1), vel_body(2), omega_body(0), omega_body(1), omega_body(2);
+
+    vect3 euler_deg = SO3ToEuler(imu_state.rot);
+    Eigen::Vector3d euler_rad = Eigen::Vector3d(euler_deg[0], euler_deg[1], euler_deg[2]) * (PI_M / 180.0);
+    Eigen::Matrix<double, 6, 1> pose_world6;
+    pose_world6 << imu_state.pos(0), imu_state.pos(1), imu_state.pos(2), euler_rad(0), euler_rad(1), euler_rad(2);
+
+    Eigen::Matrix<double, 6, 1> accel_body6 = Eigen::Matrix<double, 6, 1>::Zero();
+    if (fastlio::dynamics::compute_body_accel(vel_body6, pose_world6, accel_body6))
+    {
+      V3D grav_world(imu_state.grav[0], imu_state.grav[1], imu_state.grav[2]);
+      V3D grav_body = imu_state.rot.conjugate() * grav_world;
+      V3D acc_body_lin(accel_body6(0), accel_body6(1), accel_body6(2));
+      V3D specific_force_dyn = acc_body_lin + omega_body.cross(vel_body) - grav_body;
+      in.acc = specific_force_dyn + imu_state.ba;
+      in.dyn_acc << accel_body6(0), accel_body6(1), accel_body6(2);
+      in.dyn_alpha << accel_body6(3), accel_body6(4), accel_body6(5);
+      in.dyn_valid[0] = 1.0;
+    }
+    else
+    {
+      in.acc = imu_state.ba;
+      in.dyn_acc = Zero3d;
+      in.dyn_alpha = Zero3d;
+      in.dyn_valid[0] = 1.0;
+    }
+    in.gyro = imu_state.omega + imu_state.bg;
+
+    Q.block<3, 3>(0, 0).diagonal() = cov_proc_nv;
+    Q.block<3, 3>(3, 3).diagonal() = cov_proc_nw;
+    Q.block<3, 3>(6, 6).diagonal() = cov_proc_nbg;
+    Q.block<3, 3>(9, 9).diagonal() = cov_proc_nba;
+    Q.block<3, 3>(12, 12).diagonal() = cov_proc_nb_dvl;
+    Q(15, 15) = cov_proc_nb_pressure;
+    kf_state.predict(dt, Q, in);
+  };
+
+  auto predict_to = [&](double target_stamp)
+  {
+    while (thr_idx < thr_samples.size() && thr_samples[thr_idx].stamp <= target_stamp)
+    {
+      const double event_stamp = thr_samples[thr_idx].stamp;
+      if (event_stamp > current_time)
+      {
+        predict_segment(event_stamp - current_time);
+        current_time = event_stamp;
+      }
+      fastlio::dynamics::set_thruster_forces(thr_samples[thr_idx].forces);
+      ++thr_idx;
+    }
+    if (target_stamp > current_time)
+    {
+      predict_segment(target_stamp - current_time);
+      current_time = target_stamp;
+    }
+  };
+
+  int dvl_updates_applied_this_scan = 0;
+  while (dvl_idx < dvl_samples.size() && dvl_samples[dvl_idx].stamp <= pcl_end_time)
+  {
+    predict_to(dvl_samples[dvl_idx].stamp);
+    apply_dvl_update(dvl_samples[dvl_idx]);
+    last_dvl_hold_sample_.valid = true;
+    last_dvl_hold_sample_.stamp = dvl_samples[dvl_idx].stamp;
+    last_dvl_hold_sample_.vel = dvl_samples[dvl_idx].vel;
+    ++dvl_idx;
+    ++dvl_updates_applied_this_scan;
+  }
+
+  predict_to(pcl_end_time);
+  if (dvl_hold_enabled_ &&
+      dvl_updates_applied_this_scan == 0 &&
+      last_dvl_hold_sample_.valid)
+  {
+    const double hold_age_sec = pcl_end_time - last_dvl_hold_sample_.stamp;
+    if (hold_age_sec >= 0.0 && hold_age_sec <= dvl_hold_max_age_sec_)
+    {
+      DvlSample held_sample;
+      held_sample.stamp = last_dvl_hold_sample_.stamp;
+      held_sample.vel = last_dvl_hold_sample_.vel;
+      apply_dvl_update(held_sample);
+    }
+  }
+
+  state_ikfom imu_state = kf_state.get_x();
+  angvel_last = imu_state.omega;
+  if (in.dyn_valid[0] > 0.5)
+  {
+    acc_s_last = imu_state.rot * in.dyn_acc;
+  }
+  else
+  {
+    acc_s_last = Zero3d;
+  }
+  last_lidar_end_time_ = pcl_end_time;
+}
+
 void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, process_noise_ikfom::DOF, input_ikfom> &kf_state, int &N)
 {
   /** 1. initializing the gravity, gyro bias, acc and gyro covariance
@@ -260,7 +541,7 @@ void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 
     N ++;
   }
   state_ikfom init_state = kf_state.get_x();
-  init_state.grav = (- mean_acc / mean_acc.norm() * G_m_s2);
+  init_state.grav = (- mean_acc / mean_acc.norm() * gravity_mps2_);
   
   //state_inout.rot = Eye3d; // Exp(mean_acc.cross(V3D(0, 0, -1 / scale_gravity)));
   init_state.bg  = mean_gyr;
@@ -289,7 +570,12 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
 {
   /*** add the imu of the last frame-tail to the of current frame-head ***/
   auto v_imu = meas.imu;
-  v_imu.push_front(last_imu_);
+  const double first_imu_stamp = rclcpp::Time(v_imu.front()->header.stamp).seconds();
+  const double prev_imu_stamp = rclcpp::Time(last_imu_->header.stamp).seconds();
+  if (prev_imu_stamp >= last_lidar_end_time_ && prev_imu_stamp < first_imu_stamp)
+  {
+    v_imu.push_front(last_imu_);
+  }
   const double &imu_beg_time = rclcpp::Time(v_imu.front()->header.stamp).seconds();
   const double &imu_end_time = rclcpp::Time(v_imu.back()->header.stamp).seconds();
   const double &pcl_beg_time = meas.lidar_beg_time;
@@ -380,6 +666,9 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
   int dvl_updates_applied_this_scan = 0;
 
   input_ikfom in;
+  in.dyn_acc = Zero3d;
+  in.dyn_alpha = Zero3d;
+  in.dyn_valid[0] = 0.0;
   auto apply_dvl_update = [&](const DvlSample &sample)
   {
     if (dvl_min_speed_ > 0.0 && sample.vel.norm() < dvl_min_speed_)
@@ -417,7 +706,10 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
 
     // fout_imu << setw(10) << head->header.stamp.toSec() - first_lidar_time << " " << angvel_avr.transpose() << " " << acc_avr.transpose() << endl;
 
-    acc_avr     = acc_avr * G_m_s2 / mean_acc.norm(); // - state_inout.ba;
+    if (normalize_accel_to_gravity_)
+    {
+      acc_avr = acc_avr * gravity_mps2_ / mean_acc.norm();
+    }
 
     const double seg_start = std::max(head_stamp, last_lidar_end_time_);
     if (tail_stamp <= seg_start)
@@ -447,6 +739,9 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
         V3D vel_body = imu_state.vel;
         dyn_acc_valid = false;
         specific_force_dyn = acc_avr;
+        in.dyn_acc = Zero3d;
+        in.dyn_alpha = Zero3d;
+        in.dyn_valid[0] = 0.0;
         if (dynamics_available)
         {
           Eigen::Matrix<double, 6, 1> vel_body6;
@@ -465,6 +760,9 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
             V3D acc_body_lin(accel_body6(0), accel_body6(1), accel_body6(2));
             specific_force_dyn = acc_body_lin + omega_body.cross(vel_body) - grav_body;
             in.acc = specific_force_dyn + imu_state.ba;
+            in.dyn_acc << accel_body6(0), accel_body6(1), accel_body6(2);
+            in.dyn_alpha << accel_body6(3), accel_body6(4), accel_body6(5);
+            in.dyn_valid[0] = 1.0;
             dyn_acc_valid = true;
           }
         }
@@ -508,6 +806,9 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
 
       dyn_acc_valid = false;
       specific_force_dyn = acc_avr;
+      in.dyn_acc = Zero3d;
+      in.dyn_alpha = Zero3d;
+      in.dyn_valid[0] = 0.0;
       if (dynamics_available)
       {
         Eigen::Matrix<double, 6, 1> vel_body6;
@@ -526,6 +827,9 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
           V3D acc_body_lin(accel_body6(0), accel_body6(1), accel_body6(2));
           specific_force_dyn = acc_body_lin + omega_body.cross(vel_body) - grav_body;
           in.acc = specific_force_dyn + imu_state.ba;
+          in.dyn_acc << accel_body6(0), accel_body6(1), accel_body6(2);
+          in.dyn_alpha << accel_body6(3), accel_body6(4), accel_body6(5);
+          in.dyn_valid[0] = 1.0;
           dyn_acc_valid = true;
         }
       }
@@ -543,15 +847,24 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
       kf_state.predict(dt, Q, in);
     }
 
+    const double accel_norm = acc_avr.norm();
+    const double gyro_norm = angvel_avr.norm();
+    const bool quasi_static =
+        std::abs(accel_norm - gravity_mps2_) <= imu_accel_static_gate_mps2_ &&
+        gyro_norm <= imu_gyro_static_gate_rps_;
+
     double lambda_dyn = fastlio::dynamics::has_model() ? std::max(0.01, dynamics_model_trust_) : 1.0;
     set_imu_accel_noise_diag(Eigen::Vector3d(cov_acc(0), cov_acc(1), cov_acc(2)) * lambda_dyn);
     set_imu_gyro_noise_diag(Eigen::Vector3d(cov_gyr(0), cov_gyr(1), cov_gyr(2)));
-    double z_arr[3] = {acc_avr(0), acc_avr(1), acc_avr(2)};
-    vect3 z_acc(z_arr, 3);
-    kf_state.update_iterated_dyn_runtime_share(z_acc, h_imu_accel_share);
     double z_gyr_arr[3] = {angvel_avr(0), angvel_avr(1), angvel_avr(2)};
     vect3 z_gyr(z_gyr_arr, 3);
     kf_state.update_iterated_dyn_runtime_share(z_gyr, h_imu_gyro_share);
+    if (imu_accel_update_en_ && quasi_static)
+    {
+      double z_arr[3] = {acc_avr(0), acc_avr(1), acc_avr(2)};
+      vect3 z_acc(z_arr, 3);
+      kf_state.update_iterated_dyn_runtime_share(z_acc, h_imu_accel_share);
+    }
     if (thruster_meas_en_ && dyn_acc_valid)
     {
       double z_thr_arr[3] = {specific_force_dyn(0), specific_force_dyn(1), specific_force_dyn(2)};
@@ -668,8 +981,23 @@ void ImuProcess::Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 
     cur_pcl_un_->clear();
   }
 
-  if(meas.imu.empty()) {return;};
   assert(meas.lidar != nullptr);
+
+  const bool can_propagate_without_imu =
+      meas.imu.empty() &&
+      dynamics_state_propagation_enabled() &&
+      fastlio::dynamics::has_model();
+  if (can_propagate_without_imu)
+  {
+    if (imu_need_init_)
+    {
+      InitializeWithoutImu(meas, kf_state);
+    }
+    PropagateWithDynamicsOnly(meas, kf_state, *cur_pcl_un_);
+    return;
+  }
+
+  if(meas.imu.empty()) {return;};
 
   if (imu_need_init_)
   {
@@ -684,7 +1012,10 @@ void ImuProcess::Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 
     state_ikfom imu_state = kf_state.get_x();
     if (init_iter_num > MAX_INI_COUNT)
     {
-      cov_acc *= pow(G_m_s2 / mean_acc.norm(), 2);
+      if (normalize_accel_to_gravity_)
+      {
+        cov_acc *= pow(gravity_mps2_ / mean_acc.norm(), 2);
+      }
       imu_need_init_ = false;
 
       cov_acc = cov_acc_scale;

@@ -536,7 +536,12 @@ bool sync_packages(MeasureGroup &meas)
 {
     std::lock_guard<std::mutex> lock(mtx_buffer);
 
-    if (lidar_buffer.empty() || imu_buffer.empty()) {
+    if (lidar_buffer.empty()) {
+        return false;
+    }
+
+    const bool allow_model_only = dynamics_state_propagation_enabled();
+    if (imu_buffer.empty() && !allow_model_only) {
         return false;
     }
 
@@ -567,7 +572,7 @@ bool sync_packages(MeasureGroup &meas)
         lidar_pushed = true;
     }
 
-    if (last_timestamp_imu < lidar_end_time)
+    if (!imu_buffer.empty() && last_timestamp_imu < lidar_end_time)
     {
         return false;
     }
@@ -596,7 +601,10 @@ bool sync_predict_only(MeasureGroup &meas)
 {
     std::lock_guard<std::mutex> lock(mtx_buffer);
 
-    if (!imu_driven_propagation || imu_buffer.empty())
+    const bool have_imu = !imu_buffer.empty();
+    const bool have_model_clock = dynamics_state_propagation_enabled() && !thruster_buffer.empty();
+
+    if (!imu_driven_propagation || (!have_imu && !have_model_clock))
     {
         return false;
     }
@@ -610,21 +618,33 @@ bool sync_predict_only(MeasureGroup &meas)
     const double expected_scan_period = lidar_mean_scantime > 1e-3
         ? lidar_mean_scantime
         : ((p_pre && p_pre->SCAN_RATE > 0) ? 1.0 / static_cast<double>(p_pre->SCAN_RATE) : 0.1);
+    double latest_motion_time = -std::numeric_limits<double>::infinity();
+    if (have_imu)
+    {
+        latest_motion_time = std::max(latest_motion_time, last_timestamp_imu);
+    }
+    if (have_model_clock)
+    {
+        latest_motion_time = std::max(latest_motion_time, last_timestamp_thruster);
+    }
     double propagation_guard_time = 0.0;
     if (lidar_ever_received)
     {
         propagation_guard_time = expected_scan_period;
         const double dropout_trigger_time = last_timestamp_lidar + expected_scan_period;
-        if (!(last_timestamp_imu > dropout_trigger_time))
+        if (!(latest_motion_time > dropout_trigger_time))
         {
             return false;
         }
     }
 
+    const double first_motion_time = have_imu
+        ? get_time_sec(imu_buffer.front()->header.stamp)
+        : get_time_sec(thruster_buffer.front()->header.stamp);
     const double sensor_window_start = std::isfinite(last_sync_lidar_end_time)
         ? last_sync_lidar_end_time
-        : get_time_sec(imu_buffer.front()->header.stamp);
-    const double propagation_end_time = last_timestamp_imu - propagation_guard_time;
+        : first_motion_time;
+    const double propagation_end_time = latest_motion_time - propagation_guard_time;
     if (!(propagation_end_time > sensor_window_start))
     {
         return false;
@@ -638,12 +658,12 @@ bool sync_predict_only(MeasureGroup &meas)
 
     collect_measurement_window(imu_buffer, meas.imu, sensor_window_start, propagation_end_time,
                                [](const auto &msg) { return get_time_sec(msg->header.stamp); });
-    if (meas.imu.empty())
+    collect_measurement_window(thruster_buffer, meas.thruster_forces, sensor_window_start, propagation_end_time,
+                               [](const auto &msg) { return get_time_sec(msg->header.stamp); });
+    if (meas.imu.empty() && meas.thruster_forces.empty())
     {
         return false;
     }
-    collect_measurement_window(thruster_buffer, meas.thruster_forces, sensor_window_start, propagation_end_time,
-                               [](const auto &msg) { return get_time_sec(msg->header.stamp); });
     collect_measurement_window(dvl_buffer, meas.dvl, sensor_window_start, propagation_end_time,
                                [](const auto &msg) { return get_time_sec(msg->header.stamp); });
     collect_measurement_window(pressure_buffer, meas.pressure, sensor_window_start, propagation_end_time,
@@ -1223,6 +1243,11 @@ public:
         this->declare_parameter<string>("common.imu_topic", "/livox/imu");
         this->declare_parameter<bool>("common.time_sync_en", false);
         this->declare_parameter<double>("common.time_offset_lidar_to_imu", 0.0);
+        this->declare_parameter<bool>("imu.accel_update_en", true);
+        this->declare_parameter<double>("imu.accel_static_gate_mps2", 0.5);
+        this->declare_parameter<double>("imu.gyro_static_gate_rps", 0.35);
+        this->declare_parameter<double>("imu.gravity_mps2", G_m_s2);
+        this->declare_parameter<bool>("imu.normalize_accel_to_gravity", true);
         this->declare_parameter<double>("filter_size_corner", 0.5);
         this->declare_parameter<double>("filter_size_surf", 0.5);
         this->declare_parameter<double>("filter_size_map", 0.5);
@@ -1270,6 +1295,7 @@ public:
         this->declare_parameter<string>("dynamics.config_path", "");
         this->declare_parameter<string>("dynamics.forces_topic", "/auv/forces_desired_stamped");
         this->declare_parameter<double>("dynamics.model_trust", 1.0);
+        this->declare_parameter<bool>("dynamics.propagate_vel_omega_from_model", false);
         this->declare_parameter<bool>("dynamics.thruster_meas_en", false);
         this->declare_parameter<double>("dynamics.thruster_acc_cov", 0.1);
     this->declare_parameter<string>("frames.map_frame", map_frame_id);
@@ -1290,6 +1316,11 @@ public:
         this->get_parameter_or<string>("common.imu_topic", imu_topic,"/livox/imu");
         this->get_parameter_or<bool>("common.time_sync_en", time_sync_en, false);
         this->get_parameter_or<double>("common.time_offset_lidar_to_imu", time_diff_lidar_to_imu, 0.0);
+        this->get_parameter_or<bool>("imu.accel_update_en", imu_accel_update_en_, true);
+        this->get_parameter_or<double>("imu.accel_static_gate_mps2", imu_accel_static_gate_mps2_, 0.5);
+        this->get_parameter_or<double>("imu.gyro_static_gate_rps", imu_gyro_static_gate_rps_, 0.35);
+        this->get_parameter_or<double>("imu.gravity_mps2", imu_gravity_mps2_, G_m_s2);
+        this->get_parameter_or<bool>("imu.normalize_accel_to_gravity", imu_normalize_accel_to_gravity_, true);
         this->get_parameter_or<double>("filter_size_corner",filter_size_corner_min,0.5);
         this->get_parameter_or<double>("filter_size_surf",filter_size_surf_min,0.5);
         this->get_parameter_or<double>("filter_size_map",filter_size_map_min,0.5);
@@ -1343,6 +1374,7 @@ public:
         this->get_parameter_or<string>("dynamics.config_path", dynamics_config_path_, "");
         this->get_parameter_or<string>("dynamics.forces_topic", dynamics_forces_topic_, "/auv/forces_desired_stamped");
         this->get_parameter_or<double>("dynamics.model_trust", dynamics_model_trust_, 1.0);
+        this->get_parameter_or<bool>("dynamics.propagate_vel_omega_from_model", dynamics_propagate_vel_omega_from_model_, false);
         this->get_parameter_or<bool>("dynamics.thruster_meas_en", thruster_meas_en_, false);
         this->get_parameter_or<double>("dynamics.thruster_acc_cov", thruster_acc_cov_, 0.1);
         this->get_parameter_or<string>("frames.map_frame", map_frame_id, map_frame_id);
@@ -1408,7 +1440,10 @@ public:
                      V3D(proc_nb_dvl, proc_nb_dvl, proc_nb_dvl), proc_nb_pressure);
         p_imu->set_dvl_params(dvl_cov_floor_std, dvl_min_speed);
         p_imu->set_dvl_hold(dvl_hold_enabled, dvl_hold_max_age_sec);
+        p_imu->set_imu_accel_update(imu_accel_update_en_, imu_accel_static_gate_mps2_, imu_gyro_static_gate_rps_);
+        p_imu->set_gravity_config(imu_gravity_mps2_, imu_normalize_accel_to_gravity_);
         p_imu->set_dynamics_trust(dynamics_model_trust_);
+        set_dynamics_state_propagation(dynamics_propagate_vel_omega_from_model_);
         p_imu->set_thruster_meas(thruster_meas_en_,
                                  V3D(thruster_acc_cov_, thruster_acc_cov_, thruster_acc_cov_));
 
@@ -1884,8 +1919,14 @@ private:
     std::string dynamics_config_path_;
     std::string dynamics_forces_topic_;
     double dynamics_model_trust_ = 1.0;
+    bool dynamics_propagate_vel_omega_from_model_ = false;
     bool thruster_meas_en_ = false;
     double thruster_acc_cov_ = 0.1;
+    bool imu_accel_update_en_ = true;
+    double imu_accel_static_gate_mps2_ = 0.5;
+    double imu_gyro_static_gate_rps_ = 0.35;
+    double imu_gravity_mps2_ = G_m_s2;
+    bool imu_normalize_accel_to_gravity_ = true;
     std::shared_ptr<mvm::UnderwaterVehicleModel> dynamics_model_;
 
     bool effect_pub_en = false, map_pub_en = false;
