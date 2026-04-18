@@ -21,6 +21,7 @@ inline Eigen::Matrix3d g_dvl_R_b_d = Eigen::Matrix3d::Identity();
 inline Eigen::Vector3d g_dvl_r_bd_b = Eigen::Vector3d::Zero();
 inline double g_pressure_meas_var = 1.0;
 inline Eigen::Vector3d g_pressure_r_bp_b = Eigen::Vector3d::Zero();
+inline bool g_dynamics_propagate_vel_omega_from_model = false;
 
 inline void set_imu_accel_noise_diag(const Eigen::Vector3d &diag)
 {
@@ -58,6 +59,16 @@ inline void set_pressure_mount(const Eigen::Vector3d &r_bp_b)
 	g_pressure_r_bp_b = r_bp_b;
 }
 
+inline void set_dynamics_state_propagation(bool enable)
+{
+	g_dynamics_propagate_vel_omega_from_model = enable;
+}
+
+inline bool dynamics_state_propagation_enabled()
+{
+	return g_dynamics_propagate_vel_omega_from_model;
+}
+
 MTK_BUILD_MANIFOLD(state_ikfom,
 ((vect3, pos))
 ((SO3, rot))
@@ -75,6 +86,9 @@ MTK_BUILD_MANIFOLD(state_ikfom,
 MTK_BUILD_MANIFOLD(input_ikfom,
 ((vect3, acc))
 ((vect3, gyro))
+((vect3, dyn_acc))
+((vect3, dyn_alpha))
+((vect1, dyn_valid))
 );
 
 MTK_BUILD_MANIFOLD(process_noise_ikfom,
@@ -88,6 +102,11 @@ MTK_BUILD_MANIFOLD(process_noise_ikfom,
 
 constexpr int kStateDof = state_ikfom::DOF;
 constexpr int kProcessNoiseDof = process_noise_ikfom::DOF;
+
+inline bool use_model_state_propagation(const input_ikfom &in)
+{
+	return g_dynamics_propagate_vel_omega_from_model && in.dyn_valid[0] > 0.5;
+}
 
 struct DynamicsEvalCache
 {
@@ -183,45 +202,28 @@ Eigen::Matrix<double, kStateDof, 1> get_f(state_ikfom &s, const input_ikfom &in)
 
 	vect3 omega_meas;
 	in.gyro.boxminus(omega_meas, s.bg);
-	Eigen::Vector3d omega_body(s.omega[0], s.omega[1], s.omega[2]);
 	Eigen::Vector3d vel_body(s.vel[0], s.vel[1], s.vel[2]);
-	Eigen::Vector3d rot_rate_body = omega_body;
+	Eigen::Vector3d omega_body(s.omega[0], s.omega[1], s.omega[2]);
+	Eigen::Vector3d rot_rate_body(omega_meas[0], omega_meas[1], omega_meas[2]);
 
 	// Kinematics
 	Eigen::Vector3d pos_dot = s.rot.toRotationMatrix() * vel_body;
 
-	// Dynamics (body frame)
 	Eigen::Vector3d vel_dot = Eigen::Vector3d::Zero();
 	Eigen::Vector3d omega_dot = Eigen::Vector3d::Zero();
-	bool dynamics_used = false;
-	if (fastlio::dynamics::has_model())
+	if (use_model_state_propagation(in))
 	{
-		vect3 euler_deg = SO3ToEuler(s.rot);
-		constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
-		Eigen::Vector3d euler_rad(euler_deg[0] * kDegToRad, euler_deg[1] * kDegToRad, euler_deg[2] * kDegToRad);
-		Eigen::Matrix<double, 6, 1> pose_world6;
-		pose_world6 << s.pos[0], s.pos[1], s.pos[2], euler_rad(0), euler_rad(1), euler_rad(2);
-
-		Eigen::Matrix<double, 6, 1> vel_body6;
-		vel_body6 << vel_body(0), vel_body(1), vel_body(2), omega_body(0), omega_body(1), omega_body(2);
-
-		Eigen::Matrix<double, 6, 1> accel_body6;
-		if (fastlio::dynamics::compute_body_accel(vel_body6, pose_world6, accel_body6))
-		{
-			vel_dot = accel_body6.head<3>();
-			omega_dot = accel_body6.tail<3>();
-			dynamics_used = true;
-		}
+		rot_rate_body = omega_body;
+		vel_dot = Eigen::Vector3d(in.dyn_acc[0], in.dyn_acc[1], in.dyn_acc[2]);
+		omega_dot = Eigen::Vector3d(in.dyn_alpha[0], in.dyn_alpha[1], in.dyn_alpha[2]);
 	}
-
-	if (!dynamics_used)
+	else
 	{
-		rot_rate_body = Eigen::Vector3d(omega_meas[0], omega_meas[1], omega_meas[2]);
+		// Strapdown IMU propagation in body frame.
 		Eigen::Vector3d grav_world(s.grav[0], s.grav[1], s.grav[2]);
 		Eigen::Vector3d grav_body = s.rot.toRotationMatrix().transpose() * grav_world;
 		Eigen::Vector3d specific_force = Eigen::Vector3d(in.acc[0], in.acc[1], in.acc[2]) - Eigen::Vector3d(s.ba[0], s.ba[1], s.ba[2]);
-		vel_dot = specific_force - omega_body.cross(vel_body) + grav_body;
-		omega_dot = Eigen::Vector3d::Zero();
+		vel_dot = specific_force - rot_rate_body.cross(vel_body) + grav_body;
 	}
 
 	for (int i = 0; i < 3; ++i)
@@ -252,9 +254,12 @@ Eigen::Matrix<double, kStateDof, kStateDof> df_dx(state_ikfom &s, const input_ik
 	// rot_dot = omega_body
 	cov.template block<3, 3>(3, 15) = Eigen::Matrix3d::Identity();
 
-	// vel_dot depends on accel bias and gravity (fallback model)
-	cov.template block<3, 3>(12, 21) = -Eigen::Matrix3d::Identity();
-	cov.template block<3, 3>(12, 24) = s.rot.toRotationMatrix().transpose();
+	if (!use_model_state_propagation(in))
+	{
+		// Strapdown fallback: vel_dot depends on accel bias and gravity.
+		cov.template block<3, 3>(12, 21) = -Eigen::Matrix3d::Identity();
+		cov.template block<3, 3>(12, 24) = s.rot.toRotationMatrix().transpose();
+	}
 
 	return cov;
 }

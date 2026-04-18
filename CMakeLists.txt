@@ -78,7 +78,7 @@ pkg_check_modules(LIBCONFIGPP REQUIRED libconfig++)
 find_library(UNDERWATER_VEHICLE_MODEL NAMES underwater_vehicle_model REQUIRED)
 find_package(pcl_ros REQUIRED)
 find_package(pcl_conversions REQUIRED)
-find_package(GTSAM REQUIRED QUIET)
+find_package(GTSAM QUIET)
 option(FASTLIO_REQUIRE_LIVOX "Fail configuration if livox_ros_driver2 is missing" OFF)
 find_package(livox_ros_driver2 QUIET)
 find_package(rosidl_default_generators REQUIRED)
@@ -107,6 +107,14 @@ elseif(FASTLIO_REQUIRE_LIVOX)
   message(FATAL_ERROR "livox_ros_driver2 not found but FASTLIO_REQUIRE_LIVOX is ON. Install the driver or disable the option.")
 else()
   message(WARNING "livox_ros_driver2 not found: Livox-specific LiDAR pipelines will be disabled.")
+endif()
+
+set(FASTLIO_HAS_GTSAM FALSE)
+if(GTSAM_FOUND)
+  set(FASTLIO_HAS_GTSAM TRUE)
+  message(STATUS "GTSAM detected: loop closure backend enabled")
+else()
+  message(WARNING "GTSAM not found: loop closure backend will be disabled.")
 endif()
 
 # Thirdparty libraries
@@ -164,24 +172,26 @@ if(FASTLIO_HAS_LIVOX)
   target_compile_definitions(fastlio_mapping PRIVATE FASTLIO_HAS_LIVOX)
 endif()
 
-add_executable(loop_closure_backend_node
-  src/loop_closure_backend_node.cpp
-)
-set_target_properties(loop_closure_backend_node PROPERTIES
-  CXX_STANDARD 17
-  CXX_STANDARD_REQUIRED ON
-)
-target_include_directories(loop_closure_backend_node PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
-  $<INSTALL_INTERFACE:include>
-  ${PCL_INCLUDE_DIRS}
-)
-target_link_libraries(loop_closure_backend_node
-  ${PCL_LIBRARIES}
-  Eigen3::Eigen
-  gtsam
-)
+if(FASTLIO_HAS_GTSAM)
+  add_executable(loop_closure_backend_node
+    src/loop_closure_backend_node.cpp
+  )
+  set_target_properties(loop_closure_backend_node PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON
+  )
+  target_include_directories(loop_closure_backend_node PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+    $<INSTALL_INTERFACE:include>
+    ${PCL_INCLUDE_DIRS}
+  )
+  target_link_libraries(loop_closure_backend_node
+    ${PCL_LIBRARIES}
+    Eigen3::Eigen
+    gtsam
+  )
+endif()
 
 list(APPEND EOL_LIST "foxy" "galactic" "eloquent" "dashing" "crystal")
 
@@ -189,32 +199,44 @@ if($ENV{ROS_DISTRO} IN_LIST EOL_LIST)
   # Custommsg to support foxy & galactic
   rosidl_target_interfaces(fastlio_mapping
     ${PROJECT_NAME} "rosidl_typesupport_cpp")
-  rosidl_target_interfaces(loop_closure_backend_node
-    ${PROJECT_NAME} "rosidl_typesupport_cpp")
+  if(FASTLIO_HAS_GTSAM)
+    rosidl_target_interfaces(loop_closure_backend_node
+      ${PROJECT_NAME} "rosidl_typesupport_cpp")
+  endif()
 else()
   rosidl_get_typesupport_target(cpp_typesupport_target
     ${PROJECT_NAME} "rosidl_typesupport_cpp")
   target_link_libraries(fastlio_mapping ${cpp_typesupport_target})
-  target_link_libraries(loop_closure_backend_node ${cpp_typesupport_target})
+  if(FASTLIO_HAS_GTSAM)
+    target_link_libraries(loop_closure_backend_node ${cpp_typesupport_target})
+  endif()
 endif()
 
 ament_target_dependencies(fastlio_mapping ${dependencies})
-ament_target_dependencies(loop_closure_backend_node
-  rclcpp
-  geometry_msgs
-  nav_msgs
-  sensor_msgs
-  std_msgs
-  visualization_msgs
-  tf2
-  tf2_ros
-  pcl_conversions
-)
+if(FASTLIO_HAS_GTSAM)
+  ament_target_dependencies(loop_closure_backend_node
+    rclcpp
+    geometry_msgs
+    nav_msgs
+    sensor_msgs
+    std_msgs
+    visualization_msgs
+    tf2
+    tf2_ros
+    pcl_conversions
+  )
+endif()
 
 # ---------------- Install --------------- #
-install(TARGETS fastlio_mapping loop_closure_backend_node
+install(TARGETS fastlio_mapping
   DESTINATION lib/${PROJECT_NAME}
 )
+
+if(FASTLIO_HAS_GTSAM)
+  install(TARGETS loop_closure_backend_node
+    DESTINATION lib/${PROJECT_NAME}
+  )
+endif()
 
 install(
   DIRECTORY config launch rviz

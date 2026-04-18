@@ -51,6 +51,8 @@ class ImuProcess
   void set_thruster_meas(bool enable, const V3D &cov);
   void set_dvl_params(double cov_floor_std, double min_speed);
   void set_dvl_hold(bool enable, double max_age_sec);
+  void set_imu_accel_update(bool enable, double static_accel_gate_mps2, double static_gyro_gate_rps);
+  void set_gravity_config(double gravity_mps2, bool normalize_accel_to_gravity);
   void set_process_noise(const V3D &nv, const V3D &nw, const V3D &nbg, const V3D &nba, const V3D &nb_dvl, double nb_pressure);
   Eigen::Matrix<double, process_noise_ikfom::DOF, process_noise_ikfom::DOF> Q;
   void Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, process_noise_ikfom::DOF, input_ikfom> &kf_state, PointCloudXYZI::Ptr pcl_un_);
@@ -71,6 +73,11 @@ class ImuProcess
   double dynamics_model_trust_ = 1.0;
   bool thruster_meas_en_ = false;
   V3D thruster_acc_cov_ = V3D(0.1, 0.1, 0.1);
+  bool imu_accel_update_en_ = true;
+  double imu_accel_static_gate_mps2_ = 0.5;
+  double imu_gyro_static_gate_rps_ = 0.35;
+  double gravity_mps2_ = G_m_s2;
+  bool normalize_accel_to_gravity_ = true;
   double dvl_cov_floor_std_ = 0.01;
   double dvl_min_speed_ = 0.0;
   bool dvl_hold_enabled_ = false;
@@ -107,7 +114,7 @@ class ImuProcess
 };
 
 ImuProcess::ImuProcess()
-    : b_first_frame_(true), imu_need_init_(true), start_timestamp_(-1)
+    : b_first_frame_(true), imu_need_init_(true), start_timestamp_(-1), last_lidar_end_time_(-1.0)
 {
   init_iter_num = 1;
   Q = process_noise_cov();
@@ -144,6 +151,7 @@ void ImuProcess::Reset()
   IMUpose.clear();
   last_imu_.reset(new sensor_msgs::msg::Imu());
   cur_pcl_un_.reset(new PointCloudXYZI());
+  last_lidar_end_time_ = -1.0;
   last_dvl_hold_sample_.valid = false;
   last_dvl_hold_sample_.stamp = 0.0;
   last_dvl_hold_sample_.vel.setZero();
@@ -221,6 +229,19 @@ void ImuProcess::set_dvl_hold(bool enable, double max_age_sec)
   dvl_hold_max_age_sec_ = std::max(0.0, max_age_sec);
 }
 
+void ImuProcess::set_imu_accel_update(bool enable, double static_accel_gate_mps2, double static_gyro_gate_rps)
+{
+  imu_accel_update_en_ = enable;
+  imu_accel_static_gate_mps2_ = std::max(0.0, static_accel_gate_mps2);
+  imu_gyro_static_gate_rps_ = std::max(0.0, static_gyro_gate_rps);
+}
+
+void ImuProcess::set_gravity_config(double gravity_mps2, bool normalize_accel_to_gravity)
+{
+  gravity_mps2_ = std::max(1e-6, gravity_mps2);
+  normalize_accel_to_gravity_ = normalize_accel_to_gravity;
+}
+
 void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, process_noise_ikfom::DOF, input_ikfom> &kf_state, int &N)
 {
   /** 1. initializing the gravity, gyro bias, acc and gyro covariance
@@ -258,7 +279,7 @@ void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 
     N ++;
   }
   state_ikfom init_state = kf_state.get_x();
-  init_state.grav = (- mean_acc / mean_acc.norm() * G_m_s2);
+  init_state.grav = (- mean_acc / mean_acc.norm() * gravity_mps2_);
   
   //state_inout.rot = Eye3d; // Exp(mean_acc.cross(V3D(0, 0, -1 / scale_gravity)));
   init_state.bg  = mean_gyr;
@@ -287,7 +308,12 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
 {
   /*** add the imu of the last frame-tail to the of current frame-head ***/
   auto v_imu = meas.imu;
-  v_imu.push_front(last_imu_);
+  const double first_imu_stamp = rclcpp::Time(v_imu.front()->header.stamp).seconds();
+  const double prev_imu_stamp = rclcpp::Time(last_imu_->header.stamp).seconds();
+  if (prev_imu_stamp >= last_lidar_end_time_ && prev_imu_stamp < first_imu_stamp)
+  {
+    v_imu.push_front(last_imu_);
+  }
   const double &imu_beg_time = rclcpp::Time(v_imu.front()->header.stamp).seconds();
   const double &imu_end_time = rclcpp::Time(v_imu.back()->header.stamp).seconds();
   const double &pcl_beg_time = meas.lidar_beg_time;
@@ -362,6 +388,9 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
   int dvl_updates_applied_this_scan = 0;
 
   input_ikfom in;
+  in.dyn_acc = Zero3d;
+  in.dyn_alpha = Zero3d;
+  in.dyn_valid[0] = 0.0;
   auto apply_dvl_update = [&](const DvlSample &sample)
   {
     if (dvl_min_speed_ > 0.0 && sample.vel.norm() < dvl_min_speed_)
@@ -399,7 +428,10 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
 
     // fout_imu << setw(10) << head->header.stamp.toSec() - first_lidar_time << " " << angvel_avr.transpose() << " " << acc_avr.transpose() << endl;
 
-    acc_avr     = acc_avr * G_m_s2 / mean_acc.norm(); // - state_inout.ba;
+    if (normalize_accel_to_gravity_)
+    {
+      acc_avr = acc_avr * gravity_mps2_ / mean_acc.norm();
+    }
 
     const double seg_start = std::max(head_stamp, last_lidar_end_time_);
     if (tail_stamp <= seg_start)
@@ -429,6 +461,9 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
         V3D vel_body = imu_state.vel;
         dyn_acc_valid = false;
         specific_force_dyn = acc_avr;
+        in.dyn_acc = Zero3d;
+        in.dyn_alpha = Zero3d;
+        in.dyn_valid[0] = 0.0;
         if (dynamics_available)
         {
           Eigen::Matrix<double, 6, 1> vel_body6;
@@ -447,6 +482,9 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
             V3D acc_body_lin(accel_body6(0), accel_body6(1), accel_body6(2));
             specific_force_dyn = acc_body_lin + omega_body.cross(vel_body) - grav_body;
             in.acc = specific_force_dyn + imu_state.ba;
+            in.dyn_acc << accel_body6(0), accel_body6(1), accel_body6(2);
+            in.dyn_alpha << accel_body6(3), accel_body6(4), accel_body6(5);
+            in.dyn_valid[0] = 1.0;
             dyn_acc_valid = true;
           }
         }
@@ -490,6 +528,9 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
 
       dyn_acc_valid = false;
       specific_force_dyn = acc_avr;
+      in.dyn_acc = Zero3d;
+      in.dyn_alpha = Zero3d;
+      in.dyn_valid[0] = 0.0;
       if (dynamics_available)
       {
         Eigen::Matrix<double, 6, 1> vel_body6;
@@ -508,6 +549,9 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
           V3D acc_body_lin(accel_body6(0), accel_body6(1), accel_body6(2));
           specific_force_dyn = acc_body_lin + omega_body.cross(vel_body) - grav_body;
           in.acc = specific_force_dyn + imu_state.ba;
+          in.dyn_acc << accel_body6(0), accel_body6(1), accel_body6(2);
+          in.dyn_alpha << accel_body6(3), accel_body6(4), accel_body6(5);
+          in.dyn_valid[0] = 1.0;
           dyn_acc_valid = true;
         }
       }
@@ -525,15 +569,24 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
       kf_state.predict(dt, Q, in);
     }
 
+    const double accel_norm = acc_avr.norm();
+    const double gyro_norm = angvel_avr.norm();
+    const bool quasi_static =
+        std::abs(accel_norm - gravity_mps2_) <= imu_accel_static_gate_mps2_ &&
+        gyro_norm <= imu_gyro_static_gate_rps_;
+
     double lambda_dyn = fastlio::dynamics::has_model() ? std::max(0.01, dynamics_model_trust_) : 1.0;
     set_imu_accel_noise_diag(Eigen::Vector3d(cov_acc(0), cov_acc(1), cov_acc(2)) * lambda_dyn);
     set_imu_gyro_noise_diag(Eigen::Vector3d(cov_gyr(0), cov_gyr(1), cov_gyr(2)));
-    double z_arr[3] = {acc_avr(0), acc_avr(1), acc_avr(2)};
-    vect3 z_acc(z_arr, 3);
-    kf_state.update_iterated_dyn_runtime_share(z_acc, h_imu_accel_share);
     double z_gyr_arr[3] = {angvel_avr(0), angvel_avr(1), angvel_avr(2)};
     vect3 z_gyr(z_gyr_arr, 3);
     kf_state.update_iterated_dyn_runtime_share(z_gyr, h_imu_gyro_share);
+    if (imu_accel_update_en_ && quasi_static)
+    {
+      double z_arr[3] = {acc_avr(0), acc_avr(1), acc_avr(2)};
+      vect3 z_acc(z_arr, 3);
+      kf_state.update_iterated_dyn_runtime_share(z_acc, h_imu_accel_share);
+    }
     if (thruster_meas_en_ && dyn_acc_valid)
     {
       double z_thr_arr[3] = {specific_force_dyn(0), specific_force_dyn(1), specific_force_dyn(2)};
@@ -660,7 +713,10 @@ void ImuProcess::Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 
     state_ikfom imu_state = kf_state.get_x();
     if (init_iter_num > MAX_INI_COUNT)
     {
-      cov_acc *= pow(G_m_s2 / mean_acc.norm(), 2);
+      if (normalize_accel_to_gravity_)
+      {
+        cov_acc *= pow(gravity_mps2_ / mean_acc.norm(), 2);
+      }
       imu_need_init_ = false;
 
       cov_acc = cov_acc_scale;
