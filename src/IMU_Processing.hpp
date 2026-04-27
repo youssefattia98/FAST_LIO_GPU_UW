@@ -310,7 +310,7 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
   auto v_imu = meas.imu;
   const double first_imu_stamp = rclcpp::Time(v_imu.front()->header.stamp).seconds();
   const double prev_imu_stamp = rclcpp::Time(last_imu_->header.stamp).seconds();
-  if (prev_imu_stamp >= last_lidar_end_time_ && prev_imu_stamp < first_imu_stamp)
+  if (prev_imu_stamp < first_imu_stamp)
   {
     v_imu.push_front(last_imu_);
   }
@@ -577,10 +577,13 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
 
     double lambda_dyn = fastlio::dynamics::has_model() ? std::max(0.01, dynamics_model_trust_) : 1.0;
     set_imu_accel_noise_diag(Eigen::Vector3d(cov_acc(0), cov_acc(1), cov_acc(2)) * lambda_dyn);
-    set_imu_gyro_noise_diag(Eigen::Vector3d(cov_gyr(0), cov_gyr(1), cov_gyr(2)));
-    double z_gyr_arr[3] = {angvel_avr(0), angvel_avr(1), angvel_avr(2)};
-    vect3 z_gyr(z_gyr_arr, 3);
-    kf_state.update_iterated_dyn_runtime_share(z_gyr, h_imu_gyro_share);
+    if (use_model_state_propagation(in))
+    {
+      set_imu_gyro_noise_diag(Eigen::Vector3d(cov_gyr(0), cov_gyr(1), cov_gyr(2)));
+      double z_gyr_arr[3] = {angvel_avr(0), angvel_avr(1), angvel_avr(2)};
+      vect3 z_gyr(z_gyr_arr, 3);
+      kf_state.update_iterated_dyn_runtime_share(z_gyr, h_imu_gyro_share);
+    }
     if (imu_accel_update_en_ && quasi_static)
     {
       double z_arr[3] = {acc_avr(0), acc_avr(1), acc_avr(2)};

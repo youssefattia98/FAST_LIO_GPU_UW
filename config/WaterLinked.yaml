@@ -2,10 +2,10 @@
     ros__parameters:
         feature_extract_enable: true 
         point_filter_num: 1       
-        max_iteration: 8
-        filter_size_surf: 0.2
-        filter_size_map: 0.2
-        cube_side_length: 5.0
+        max_iteration: 12
+        filter_size_surf: 0.5
+        filter_size_map: 0.5
+        cube_side_length: 100.0
         runtime_pos_log_enable: false # true writes pose log to disk; false disables logging
         common:
             lid_topic:  "/sonar_point_cloud"
@@ -43,8 +43,8 @@
                             -0.258819045, 0.0, 0.965925826 ]
  
             process_noise:
-                nv:  1.0e-1   # linear acceleration process noise
-                nw:  1.0e-1  # angular acceleration process noise
+                nv:  0.0001   # linear acceleration process noise; match acc_cov for IMU/LiDAR-only mode
+                nw:  5.0e-6  # angular acceleration process noise; match gyr_cov for IMU/LiDAR-only mode
                 nbg:  1.0e-6 # gyro bias random-walk (lower to restrain bias wander)
                 nba: 0.0001  # accel bias random-walk (lower to restrain bias wander)
                 nb_dvl:  0.0001 # DVL bias random-walk
@@ -61,7 +61,7 @@
             thruster_acc_cov: 1.0     # covariance for thruster-accel pseudo-measurement (m/s^2)^2
 
         dvl:
-            enable: true   
+            enable: false   
             topic: "/auv/dvl"
             extrinsic_T: [ -0.079, -0.09691, -0.25938 ] # DVL_T_wrt_IMU in meters; from CAD model, but can be refined by extrinsic estimation if enabled
             extrinsic_R: [ 1., 0., 0.,
@@ -73,7 +73,7 @@
             hold_max_age_sec: 0.25
 
         pressure:
-            enable: true
+            enable: false
             topic: "/auv/pressure/scaled2"
             extrinsic_T: [ -0.24219, -0.03954, 0.01898] # pressure sensor position wrt IMU frame [m]
             covariance_floor_std: 0.1

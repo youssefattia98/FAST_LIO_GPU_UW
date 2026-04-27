@@ -251,12 +251,30 @@ Eigen::Matrix<double, kStateDof, kStateDof> df_dx(state_ikfom &s, const input_ik
 	cov.template block<3, 3>(0, 12) = s.rot.toRotationMatrix();
 	cov.template block<3, 3>(0, 3) = -s.rot.toRotationMatrix() * MTK::hat(vel_body);
 
-	// rot_dot = omega_body
-	cov.template block<3, 3>(3, 15) = Eigen::Matrix3d::Identity();
-
-	if (!use_model_state_propagation(in))
+	if (use_model_state_propagation(in))
 	{
-		// Strapdown fallback: vel_dot depends on accel bias and gravity.
+		// rot_dot = omega_body when the dynamics model owns angular-rate propagation.
+		cov.template block<3, 3>(3, 15) = Eigen::Matrix3d::Identity();
+	}
+	else
+	{
+		// Strapdown fallback:
+		//   rot_dot = gyro - bg
+		//   vel_dot = acc - ba - (gyro - bg) x vel_body + R^T grav
+		vect3 omega_meas;
+		in.gyro.boxminus(omega_meas, s.bg);
+		Eigen::Vector3d rot_rate_body(omega_meas[0], omega_meas[1], omega_meas[2]);
+		Eigen::Vector3d grav_world(s.grav[0], s.grav[1], s.grav[2]);
+		Eigen::Vector3d grav_body = s.rot.toRotationMatrix().transpose() * grav_world;
+		vect3 grav_body_mtk;
+		grav_body_mtk << grav_body(0), grav_body(1), grav_body(2);
+		vect3 rot_rate_mtk;
+		rot_rate_mtk << rot_rate_body(0), rot_rate_body(1), rot_rate_body(2);
+
+		cov.template block<3, 3>(3, 18) = -Eigen::Matrix3d::Identity();
+		cov.template block<3, 3>(12, 3) = MTK::hat(grav_body_mtk);
+		cov.template block<3, 3>(12, 12) = -MTK::hat(rot_rate_mtk);
+		cov.template block<3, 3>(12, 18) = -MTK::hat(vel_body);
 		cov.template block<3, 3>(12, 21) = -Eigen::Matrix3d::Identity();
 		cov.template block<3, 3>(12, 24) = s.rot.toRotationMatrix().transpose();
 	}
@@ -268,9 +286,21 @@ Eigen::Matrix<double, kStateDof, kStateDof> df_dx(state_ikfom &s, const input_ik
 Eigen::Matrix<double, kStateDof, kProcessNoiseDof> df_dw(state_ikfom &s, const input_ikfom &in)
 {
 	Eigen::Matrix<double, kStateDof, kProcessNoiseDof> cov = Eigen::Matrix<double, kStateDof, kProcessNoiseDof>::Zero();
-	// velocity and omega process noise
+	vect3 vel_body;
+	vel_body << s.vel[0], s.vel[1], s.vel[2];
+
+	// velocity process noise
 	cov.template block<3, 3>(12, 0) = Eigen::Matrix3d::Identity();
-	cov.template block<3, 3>(15, 3) = Eigen::Matrix3d::Identity();
+	if (use_model_state_propagation(in))
+	{
+		cov.template block<3, 3>(15, 3) = Eigen::Matrix3d::Identity();
+	}
+	else
+	{
+		// Gyro noise perturbs attitude propagation and the body-frame Coriolis term.
+		cov.template block<3, 3>(3, 3) = -Eigen::Matrix3d::Identity();
+		cov.template block<3, 3>(12, 3) = -MTK::hat(vel_body);
+	}
 	// bias random walks
 	cov.template block<3, 3>(18, 6) = Eigen::Matrix3d::Identity();
 	cov.template block<3, 3>(21, 9) = Eigen::Matrix3d::Identity();
